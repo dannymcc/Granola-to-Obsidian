@@ -252,7 +252,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					
 					// Check for daily note integration regardless of sync success
 					// This ensures existing notes from today are still included
-					if (this.settings.enableDailyNoteIntegration && doc.created_at) {
+					if ((this.settings.enableDailyNoteIntegration || this.settings.enablePeriodicNoteIntegration) && doc.created_at)
 						const noteDate = new Date(doc.created_at).toDateString();
 						if (noteDate === today) {
 							// Find the actual file that was created or already exists
