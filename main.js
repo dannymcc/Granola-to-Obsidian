@@ -37,6 +37,7 @@ const DEFAULT_SETTINGS = {
 	dateFolderFormat: 'YYYY-MM-DD',
 	enableGranolaFolders: false, // Enable folder-based organization
 	folderTagTemplate: 'folder/{name}', // Template for folder tags
+	filenameSeparator: '_', // Character to separate words in filenames ('_', '-', or '')
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -592,20 +593,20 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	generateFilename(doc) {
 		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
-		
+
 		let createdDate = '';
 		let updatedDate = '';
 		let createdTime = '';
 		let updatedTime = '';
 		let createdDateTime = '';
 		let updatedDateTime = '';
-		
+
 		if (doc.created_at) {
 			createdDate = this.formatDate(doc.created_at, this.settings.dateFormat);
 			createdTime = this.formatDate(doc.created_at, 'HH-mm-ss');
 			createdDateTime = this.formatDate(doc.created_at, this.settings.dateFormat + '_HH-mm-ss');
 		}
-		
+
 		if (doc.updated_at) {
 			updatedDate = this.formatDate(doc.updated_at, this.settings.dateFormat);
 			updatedTime = this.formatDate(doc.updated_at, 'HH-mm-ss');
@@ -628,8 +629,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		const invalidChars = /[<>:"/\\|?*]/g;
 		filename = filename.replace(invalidChars, '');
-		filename = filename.replace(/\s+/g, '_');
-		
+		filename = filename.replace(/\s+/g, this.settings.filenameSeparator);
+
 		return filename;
 	}
 
@@ -655,7 +656,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		// Clean folder name for filesystem use
 		const cleanFolderName = folder.title
 			.replace(/[<>:"/\\|?*]/g, '') // Remove invalid filesystem characters
-			.replace(/\s+/g, '_') // Replace spaces with underscores
+			.replace(/\s+/g, this.settings.filenameSeparator) // Replace spaces with configured separator
 			.trim();
 
 		return path.join(this.settings.syncDirectory, cleanFolderName);
@@ -1567,6 +1568,22 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				text.setValue(this.plugin.settings.filenameTemplate);
 				text.onChange(async (value) => {
 					this.plugin.settings.filenameTemplate = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Filename word separator')
+			.setDesc('Character to separate words in filenames (underscore, hyphen, space, or none)')
+			.addDropdown(dropdown => {
+				dropdown.addOption('_', 'Underscore (_) - Team_Standup');
+				dropdown.addOption('-', 'Hyphen (-) - Team-Standup');
+				dropdown.addOption(' ', 'Space ( ) - Team Standup');
+				dropdown.addOption('', 'None - TeamStandup');
+
+				dropdown.setValue(this.plugin.settings.filenameSeparator);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.filenameSeparator = value;
 					await this.plugin.saveSettings();
 				});
 			});
