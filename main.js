@@ -850,6 +850,77 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
+	generateDuplicatesReport(duplicates) {
+		let report = '---\n';
+		report += 'title: "Granola Duplicates Report"\n';
+		report += 'date: ' + new Date().toISOString() + '\n';
+		report += '---\n\n';
+		report += '# Duplicate Granola Notes\n\n';
+		report += `Found ${duplicates.length} set(s) of duplicate notes.\n\n`;
+		report += '> **Tip**: Right-click on any file path below and select "Delete" from the context menu, or use the delete command in your vault.\n\n';
+
+		for (let i = 0; i < duplicates.length; i++) {
+			const duplicate = duplicates[i];
+			report += `## Duplicate Set ${i + 1}: ${duplicate.granolaId}\n\n`;
+			report += 'Files with this Granola ID:\n\n';
+
+			for (const file of duplicate.files) {
+				const fileName = file.path;
+				const baseName = fileName.split('/').pop();
+				report += `### ${baseName}\n`;
+				report += `**Path**: \`${fileName}\`\n`;
+				report += `**Link**: [[${fileName}]]\n`;
+				report += `**Delete**: Right-click the link above and delete, or delete the file directly from your vault\n\n`;
+			}
+
+			report += '---\n\n';
+		}
+
+		report += '## How to Handle Duplicates\n\n';
+		report += '1. **Review**: Click on the links above to open and review each duplicate\n';
+		report += '2. **Decide**: Determine which version you want to keep\n';
+		report += '3. **Delete**: Right-click on the file link and select delete, or delete from the vault\n';
+		report += '4. **Cleanup**: Delete this report file when done\n\n';
+		report += '> **Note**: All listed files have the same Granola ID but are stored as separate files. Only keep one copy of each note.\n';
+
+		return report;
+	}
+
+	async createOrUpdateDuplicatesFile(duplicates) {
+		try {
+			const report = this.generateDuplicatesReport(duplicates);
+			const duplicatesPath = 'Granola/Duplicates Report.md';
+
+			// Check if file exists
+			const existingFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
+
+			if (existingFile && existingFile instanceof obsidian.TFile) {
+				// Update existing file
+				await this.app.vault.modify(existingFile, report);
+			} else {
+				// Create new file
+				const folder = this.app.vault.getFolderByPath('Granola');
+				if (!folder) {
+					// Create Granola folder if it doesn't exist
+					await this.app.vault.createFolder('Granola');
+				}
+				await this.app.vault.create(duplicatesPath, report);
+			}
+
+			// Open the report file
+			const reportFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
+			if (reportFile instanceof obsidian.TFile) {
+				await this.app.workspace.getLeaf().openFile(reportFile);
+			}
+
+			new obsidian.Notice('Duplicates report created and opened');
+
+		} catch (error) {
+			console.error('Error creating duplicates report:', error);
+			new obsidian.Notice('Error creating duplicates report. Check console for details.');
+		}
+	}
+
 	async findDuplicatesAndOpen() {
 		try {
 			const duplicates = await this.findDuplicateNotes();
@@ -858,26 +929,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				return;
 			}
 
-			// Collect all duplicate files
-			const filesToOpen = [];
-			for (const duplicate of duplicates) {
-				for (const file of duplicate.files) {
-					if (!filesToOpen.some(f => f.path === file.path)) {
-						filesToOpen.push(file);
-					}
-				}
-			}
-
-			// Open each file in a new tab
-			for (const file of filesToOpen) {
-				await this.app.workspace.getLeaf('tab').openFile(file);
-			}
-
-			new obsidian.Notice(`Opened ${filesToOpen.length} duplicate file(s) in tabs`);
+			// Create and open duplicates report file
+			await this.createOrUpdateDuplicatesFile(duplicates);
 
 		} catch (error) {
-			console.error('Error opening duplicate notes in tabs:', error);
-			new obsidian.Notice('Error opening duplicate notes. Check console for details.');
+			console.error('Error processing duplicates:', error);
+			new obsidian.Notice('Error processing duplicates. Check console for details.');
 		}
 	}
 
