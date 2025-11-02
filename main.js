@@ -903,36 +903,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 
-			// Check if file exists and delete it
-			let existingFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
-			if (existingFile && existingFile instanceof obsidian.TFile) {
-				// Delete the existing file
-				await this.app.vault.delete(existingFile);
-				// Wait a moment for deletion to complete
-				await new Promise(resolve => setTimeout(resolve, 100));
-			}
+			// Check if file exists
+			let reportFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
 
-			// Create new file (with error handling in case it still exists)
-			let reportFile = null;
-			try {
+			if (reportFile && reportFile instanceof obsidian.TFile) {
+				// File exists, modify it with new content
+				await this.app.vault.modify(reportFile, report);
+			} else {
+				// File doesn't exist, create it
 				reportFile = await this.app.vault.create(duplicatesPath, report);
-			} catch (createError) {
-				if (createError.message && createError.message.includes('already exists')) {
-					// File still exists, try to modify it instead
-					const retryFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
-					if (retryFile && retryFile instanceof obsidian.TFile) {
-						await this.app.vault.modify(retryFile, report);
-						reportFile = retryFile;
-					}
-				} else {
-					throw createError;
-				}
 			}
 
 			// Open the report file
-			if (!reportFile) {
-				reportFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
-			}
 			if (reportFile instanceof obsidian.TFile) {
 				await this.app.workspace.getLeaf().openFile(reportFile);
 			}
