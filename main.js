@@ -38,6 +38,7 @@ const DEFAULT_SETTINGS = {
 	enableGranolaFolders: false, // Enable folder-based organization
 	folderTagTemplate: 'folder/{name}', // Template for folder tags
 	filenameSeparator: '_', // Character to separate words in filenames ('_', '-', or '')
+	existingFileAction: 'timestamp', // 'timestamp' - create timestamped version, 'skip' - ignore existing file
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -74,6 +75,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			name: 'Sync Granola Notes',
 			callback: () => {
 				this.syncNotes();
+			}
+		});
+
+		this.addCommand({
+			id: 'find-duplicate-granola-notes',
+			name: 'Find Duplicate Granola Notes',
+			callback: () => {
+				this.findDuplicatesAndOpen();
 			}
 		});
 
@@ -779,7 +788,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return allFolders.map(folder => folder.path).sort();
 	}
 
-	async findDuplicateNotes() {
+	async findDuplicateNotes(suppressNotice = false) {
 		try {
 			// Get all markdown files in the vault
 			const allFiles = this.app.vault.getMarkdownFiles();
@@ -821,252 +830,335 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 
-			if (duplicates.length === 0) {
-				new obsidian.Notice('No duplicate Granola notes found! 🎉');
-			} else {
+			// Only show notices if not suppressed
+			if (!suppressNotice) {
+				if (duplicates.length === 0) {
+					new obsidian.Notice('No duplicate Granola notes found! 🎉');
+				} else {
+					// Create a summary message
+					let message = `Found ${duplicates.length} set(s) of duplicate Granola notes:\n\n`;
 
-				// Create a summary message
-				let message = `Found ${duplicates.length} set(s) of duplicate Granola notes:\n\n`;
-
-				for (const duplicate of duplicates) {
-					message += `Granola ID: ${duplicate.granolaId}\n`;
-					for (const file of duplicate.files) {
-						message += `  • ${file.path}\n`;
+					for (const duplicate of duplicates) {
+						message += `Granola ID: ${duplicate.granolaId}\n`;
+						for (const file of duplicate.files) {
+							message += `  • ${file.path}\n`;
+						}
+						message += '\n';
 					}
-					message += '\n';
+
+					message += 'Check the console for full details. You can manually delete the duplicates you don\'t want to keep.';
+
+					new obsidian.Notice(message, 10000); // Show for 10 seconds
 				}
-
-				message += 'Check the console for full details. You can manually delete the duplicates you don\'t want to keep.';
-
-				new obsidian.Notice(message, 10000); // Show for 10 seconds
 			}
 
 			return duplicates;
 
 		} catch (error) {
 			console.error('Error finding duplicate notes:', error);
-			new obsidian.Notice('Error finding duplicate notes. Check console for details.');
+			if (!suppressNotice) {
+				new obsidian.Notice('Error finding duplicate notes. Check console for details.');
+			}
 			return [];
+		}
+	}
+
+	generateDuplicatesReport(duplicates) {
+		let report = '---\n';
+		report += 'title: "Granola Duplicates Report"\n';
+		report += 'date: ' + new Date().toISOString() + '\n';
+		report += '---\n\n';
+		report += '# Duplicate Granola Notes\n\n';
+		report += `Found ${duplicates.length} set(s) of duplicate notes.\n\n`;
+
+		for (let i = 0; i < duplicates.length; i++) {
+			const duplicate = duplicates[i];
+			report += `## Duplicate Set ${i + 1}: ${duplicate.granolaId}\n\n`;
+			report += '| Filename | Link |\n';
+			report += '|----------|------|\n';
+
+			for (const file of duplicate.files) {
+				const fileName = file.path;
+				const baseName = fileName.split('/').pop();
+				report += `| ${baseName} | [[${fileName}]] |\n`;
+			}
+
+			report += '\n';
+		}
+
+		report += '## Instructions\n\n';
+		report += '1. **Review**: Click the links above to open and compare each duplicate\n';
+		report += '2. **Decide**: Choose which version you want to keep\n';
+		report += '3. **Delete**: Use your file explorer to delete the files you don\'t need\n';
+		report += '4. **Cleanup**: Delete this report when done\n\n';
+		report += '> **Note**: All listed files have the same Granola ID but are stored as separate files in your vault.\n';
+
+		return report;
+	}
+
+	async createOrUpdateDuplicatesFile(duplicates) {
+		try {
+			const report = this.generateDuplicatesReport(duplicates);
+			const duplicatesPath = 'Granola/Duplicates Report.md';
+
+			// Ensure Granola folder exists
+			let folder = this.app.vault.getFolderByPath('Granola');
+			if (!folder) {
+				try {
+					folder = await this.app.vault.createFolder('Granola');
+				} catch (error) {
+					// Folder might already exist or error creating, try to get it
+					folder = this.app.vault.getFolderByPath('Granola');
+				}
+			}
+
+			// Check if file exists
+			let reportFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
+
+			if (reportFile && reportFile instanceof obsidian.TFile) {
+				// File exists, modify it with new content
+				await this.app.vault.modify(reportFile, report);
+			} else {
+				// File doesn't exist, try to create it
+				try {
+					reportFile = await this.app.vault.create(duplicatesPath, report);
+				} catch (createError) {
+					// File might have been created between the check and create, try to modify it
+					if (createError.message && createError.message.includes('already exists')) {
+						const existingFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
+						if (existingFile && existingFile instanceof obsidian.TFile) {
+							await this.app.vault.modify(existingFile, report);
+							reportFile = existingFile;
+						} else {
+							throw createError;
+						}
+					} else {
+						throw createError;
+					}
+				}
+			}
+
+			// Open the report file
+			if (reportFile instanceof obsidian.TFile) {
+				await this.app.workspace.getLeaf().openFile(reportFile);
+			}
+
+			new obsidian.Notice('Duplicates report created and opened');
+
+		} catch (error) {
+			console.error('Error creating duplicates report:', error);
+			new obsidian.Notice('Error creating duplicates report. Check console for details.');
 		}
 	}
 
 	async findDuplicatesAndOpen() {
 		try {
-			const duplicates = await this.findDuplicateNotes();
+			// Find duplicates without showing popup notice
+			const duplicates = await this.findDuplicateNotes(true);
 
 			if (duplicates.length === 0) {
+				new obsidian.Notice('No duplicate Granola notes found! 🎉');
 				return;
 			}
 
-			// Collect all duplicate files
-			const filesToOpen = [];
-			for (const duplicate of duplicates) {
-				for (const file of duplicate.files) {
-					if (!filesToOpen.some(f => f.path === file.path)) {
-						filesToOpen.push(file);
-					}
-				}
-			}
-
-			// Open each file in a new tab
-			for (const file of filesToOpen) {
-				await this.app.workspace.getLeaf('tab').openFile(file);
-			}
-
-			new obsidian.Notice(`Opened ${filesToOpen.length} duplicate file(s) in tabs`);
+			// Create and open duplicates report file
+			await this.createOrUpdateDuplicatesFile(duplicates);
 
 		} catch (error) {
-			console.error('Error opening duplicate notes in tabs:', error);
-			new obsidian.Notice('Error opening duplicate notes. Check console for details.');
+			console.error('Error processing duplicates:', error);
+			new obsidian.Notice('Error processing duplicates. Check console for details.');
 		}
 	}
 
 	async processDocument(doc) {
-		try {
-			const title = doc.title || 'Untitled Granola Note';
-			const docId = doc.id || 'unknown_id';
-			const transcript = doc.transcript || 'no_transcript';
+	try {
+		const title = doc.title || 'Untitled Granola Note';
+		const docId = doc.id || 'unknown_id';
+		const transcript = doc.transcript || 'no_transcript';
 
-			let contentToParse = null;
-			if (doc.last_viewed_panel && doc.last_viewed_panel.content && doc.last_viewed_panel.content.type === 'doc') {
-				contentToParse = doc.last_viewed_panel.content;
+		let contentToParse = null;
+		if (doc.last_viewed_panel && doc.last_viewed_panel.content && doc.last_viewed_panel.content.type === 'doc') {
+			contentToParse = doc.last_viewed_panel.content;
+		}
+
+		if (!contentToParse) {
+			return false;
+		}
+
+		// Check if note already exists by Granola ID
+		const existingFile = await this.findExistingNoteByGranolaId(docId);
+		
+		if (existingFile) {
+			if (this.settings.skipExistingNotes && !this.settings.includeAttendeeTags && !this.settings.includeGranolaUrl) {
+				return true; // Return true so it counts as "synced" but we don't update
 			}
-
-			if (!contentToParse) {
-				return false;
-			}
-
-			// Check if note already exists by Granola ID
-			const existingFile = await this.findExistingNoteByGranolaId(docId);
 			
-			if (existingFile) {
-				if (this.settings.skipExistingNotes && !this.settings.includeAttendeeTags && !this.settings.includeGranolaUrl) {
-					return true; // Return true so it counts as "synced" but we don't update
-				}
-				
-				if (this.settings.skipExistingNotes && (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl)) {
-					// Only update metadata (tags, URLs), preserve existing content
-					try {
-						await this.updateExistingNoteMetadata(existingFile, doc);
-						return true;
-					} catch (error) {
-						console.error('Error updating metadata for existing note:', error);
-						return false;
-					}
-				}
-
-				// Update existing note (full update)
+			if (this.settings.skipExistingNotes && (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl)) {
+				// Only update metadata (tags, URLs), preserve existing content
 				try {
-					const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
-
-					// Extract attendee information
-					const attendeeNames = this.extractAttendeeNames(doc);
-					const attendeeTags = this.generateAttendeeTags(attendeeNames);
-					
-					// Extract folder information
-					const folderNames = this.extractFolderNames(doc);
-					const folderTags = this.generateFolderTags(folderNames);
-					
-					// Generate Granola URL
-					const granolaUrl = this.generateGranolaUrl(docId);
-					
-
-
-					// Combine all tags
-					const allTags = [...attendeeTags, ...folderTags];
-
-					// Create frontmatter with original title
-					let frontmatter = '---\n';
-					frontmatter += 'granola_id: ' + docId + '\n';
-					const escapedTitle = title.replace(/"/g, '\\"');
-					frontmatter += 'title: "' + escapedTitle + '"\n';
-					
-					if (granolaUrl) {
-						frontmatter += 'granola_url: "' + granolaUrl + '"\n';
-					}
-					
-					if (doc.created_at) {
-						frontmatter += 'created_at: ' + doc.created_at + '\n';
-					}
-					if (doc.updated_at) {
-						frontmatter += 'updated_at: ' + doc.updated_at + '\n';
-					}
-					
-					// Add all tags if any were found
-					if (allTags.length > 0) {
-						frontmatter += 'tags:\n';
-						for (const tag of allTags) {
-							frontmatter += '  - ' + tag + '\n';
-						}
-					}
-					
-					frontmatter += '---\n\n';
-
-					// Use the note title (clean, with proper spacing) for the heading
-					const noteTitle = this.generateNoteTitle(doc);
-					let finalMarkdown = frontmatter + '# ' + noteTitle + '\n\n' + markdownContent;
-					// Add transcript section if enabled and transcript is available
-					if (this.settings.includeFullTranscript) {
-						finalMarkdown += '\n\n# Transcript\n\n' + transcript;
-					}
-					
-					await this.app.vault.process(existingFile, () => finalMarkdown);
+					await this.updateExistingNoteMetadata(existingFile, doc);
 					return true;
-				} catch (updateError) {
-					console.error('Error updating existing note:', updateError);
+				} catch (error) {
+					console.error('Error updating metadata for existing note:', error);
 					return false;
 				}
 			}
 
-			// Create new note
-			const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
-			
-			// Extract attendee information
-			const attendeeNames = this.extractAttendeeNames(doc);
-			const attendeeTags = this.generateAttendeeTags(attendeeNames);
-			
-			// Extract folder information
-			const folderNames = this.extractFolderNames(doc);
-			const folderTags = this.generateFolderTags(folderNames);
-			
-			// Generate Granola URL
-			const granolaUrl = this.generateGranolaUrl(docId);
-			
+			// Update existing note (full update)
+			try {
+				const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
 
+				// Extract attendee information
+				const attendeeNames = this.extractAttendeeNames(doc);
+				const attendeeTags = this.generateAttendeeTags(attendeeNames);
+				
+				// Extract folder information
+				const folderNames = this.extractFolderNames(doc);
+				const folderTags = this.generateFolderTags(folderNames);
+				
+				// Generate Granola URL
+				const granolaUrl = this.generateGranolaUrl(docId);
+				
 
-			// Combine all tags
-			const allTags = [...attendeeTags, ...folderTags];
+				// Combine all tags
+				const allTags = [...attendeeTags, ...folderTags];
 
-			let frontmatter = '---\n';
-			frontmatter += 'granola_id: ' + docId + '\n';
-			const escapedTitle = title.replace(/"/g, '\\"');
-			frontmatter += 'title: "' + escapedTitle + '"\n';
-			
-			if (granolaUrl) {
-				frontmatter += 'granola_url: "' + granolaUrl + '"\n';
-			}
-			
-			if (doc.created_at) {
-				frontmatter += 'created_at: ' + doc.created_at + '\n';
-			}
-			if (doc.updated_at) {
-				frontmatter += 'updated_at: ' + doc.updated_at + '\n';
-			}
-			
-			// Add all tags if any were found
-			if (allTags.length > 0) {
-				frontmatter += 'tags:\n';
-				for (const tag of allTags) {
-					frontmatter += '  - ' + tag + '\n';
+				// Create frontmatter with original title
+				let frontmatter = '---\n';
+				frontmatter += 'granola_id: ' + docId + '\n';
+				const escapedTitle = title.replace(/"/g, '\\"');
+				frontmatter += 'title: "' + escapedTitle + '"\n';
+				
+				if (granolaUrl) {
+					frontmatter += 'granola_url: "' + granolaUrl + '"\n';
 				}
-			}
-			
-			frontmatter += '---\n\n';
+				
+				if (doc.created_at) {
+					frontmatter += 'created_at: ' + doc.created_at + '\n';
+				}
+				if (doc.updated_at) {
+					frontmatter += 'updated_at: ' + doc.updated_at + '\n';
+				}
+				
+				// Add all tags if any were found
+				if (allTags.length > 0) {
+					frontmatter += 'tags:\n';
+					for (const tag of allTags) {
+						frontmatter += '  - ' + tag + '\n';
+					}
+				}
+				
+				frontmatter += '---\n\n';
 
-			let finalMarkdown = frontmatter + markdownContent;
-			// Add transcript section if enabled and transcript is available
-			if (this.settings.includeFullTranscript) {
-				finalMarkdown += '\n\n# Transcript\n\n' + transcript;
+				// Use the note title (clean, with proper spacing) for the heading
+				const noteTitle = this.generateNoteTitle(doc);
+				let finalMarkdown = frontmatter + '# ' + noteTitle + '\n\n' + markdownContent;
+				// Add transcript section if enabled and transcript is available
+				if (this.settings.includeFullTranscript) {
+					finalMarkdown += '\n\n# Transcript\n\n' + transcript;
+				}
+				
+				await this.app.vault.process(existingFile, () => finalMarkdown);
+				return true;
+			} catch (updateError) {
+				console.error('Error updating existing note:', updateError);
+				return false;
 			}
+		}
 
-			const filename = this.generateFilename(doc) + '.md';
-			// Use folder-based path if enabled, otherwise date-based, otherwise sync directory
-			let targetDirectory;
-			if (this.settings.enableGranolaFolders) {
-				targetDirectory = this.generateFolderBasedPath(doc);
-				await this.ensureFolderBasedDirectoryExists(targetDirectory);
-			} else {
-				targetDirectory = this.generateDateBasedPath(doc);
-				await this.ensureDateBasedDirectoryExists(targetDirectory);
+		// Create new note
+		const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
+		
+		// Extract attendee information
+		const attendeeNames = this.extractAttendeeNames(doc);
+		const attendeeTags = this.generateAttendeeTags(attendeeNames);
+		
+		// Extract folder information
+		const folderNames = this.extractFolderNames(doc);
+		const folderTags = this.generateFolderTags(folderNames);
+		
+		// Generate Granola URL
+		const granolaUrl = this.generateGranolaUrl(docId);
+		
+
+		// Combine all tags
+		const allTags = [...attendeeTags, ...folderTags];
+
+		let frontmatter = '---\n';
+		frontmatter += 'granola_id: ' + docId + '\n';
+		const escapedTitle = title.replace(/"/g, '\\"');
+		frontmatter += 'title: "' + escapedTitle + '"\n';
+		
+		if (granolaUrl) {
+			frontmatter += 'granola_url: "' + granolaUrl + '"\n';
+		}
+		
+		if (doc.created_at) {
+			frontmatter += 'created_at: ' + doc.created_at + '\n';
+		}
+		if (doc.updated_at) {
+			frontmatter += 'updated_at: ' + doc.updated_at + '\n';
+		}
+		
+		// Add all tags if any were found
+		if (allTags.length > 0) {
+			frontmatter += 'tags:\n';
+			for (const tag of allTags) {
+				frontmatter += '  - ' + tag + '\n';
 			}
-			const filepath = path.join(targetDirectory, filename);
+		}
+		
+		frontmatter += '---\n\n';
 
-			// Check if file with same name already exists
-			let finalFilepath = filepath;
-			const existingFileByName = this.app.vault.getAbstractFileByPath(filepath);
-			if (existingFileByName) {
-				// Create a unique filename by appending timestamp or ID
-				const createdDate = new Date(doc.created_at);
+		let finalMarkdown = frontmatter + markdownContent;
+		// Add transcript section if enabled and transcript is available
+		if (this.settings.includeFullTranscript) {
+			finalMarkdown += '\n\n# Transcript\n\n' + transcript;
+		}
+
+		const filename = this.generateFilename(doc) + '.md';
+		// Use folder-based path if enabled, otherwise date-based, otherwise sync directory
+		let targetDirectory;
+		if (this.settings.enableGranolaFolders) {
+			targetDirectory = this.generateFolderBasedPath(doc);
+			await this.ensureFolderBasedDirectoryExists(targetDirectory);
+		} else {
+			targetDirectory = this.generateDateBasedPath(doc);
+			await this.ensureDateBasedDirectoryExists(targetDirectory);
+		}
+		const filepath = path.join(targetDirectory, filename);
+
+		// Check if file with same name already exists
+		let finalFilepath = filepath;
+		const existingFileByName = this.app.vault.getAbstractFileByPath(filepath);
+		if (existingFileByName) {
+			// Handle existing file based on user's preference
+			if (this.settings.existingFileAction === 'skip') {
+				// Skip creating a new file if one with the same name exists
+				return false;
+			} else if (this.settings.existingFileAction === 'timestamp') {
+				// Create a unique filename by appending timestamp
 				const timestamp = this.formatDate(doc.created_at, 'HH-mm');
 				const baseFilename = this.generateFilename(doc);
-				const uniqueFilename = baseFilename + '_' + timestamp + '.md'; 
+				const uniqueFilename = baseFilename + '_' + timestamp + '.md';
 				finalFilepath = path.join(targetDirectory, uniqueFilename);
-				
+
 				// Check if the unique filename also exists
 				const existingUniqueFile = this.app.vault.getAbstractFileByPath(finalFilepath);
 				if (existingUniqueFile) {
 					return false;
 				}
 			}
-
-			await this.app.vault.create(finalFilepath, finalMarkdown);
-			return true;
-
-		} catch (error) {
-			console.error('Error processing document:', error);
-			return false;
 		}
+
+		await this.app.vault.create(finalFilepath, finalMarkdown);
+		return true;
+
+	} catch (error) {
+		console.error('Error processing document:', error);
+		return false;
 	}
+}
 
 	async ensureDirectoryExists() {
 		try {
@@ -1623,6 +1715,20 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				dropdown.setValue(this.plugin.settings.filenameSeparator);
 				dropdown.onChange(async (value) => {
 					this.plugin.settings.filenameSeparator = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('When file already exists by name')
+			.setDesc('Choose what to do when syncing a note with a filename that already exists')
+			.addDropdown(dropdown => {
+				dropdown.addOption('timestamp', 'Create timestamped version (e.g., filename_13-40.md)');
+				dropdown.addOption('skip', 'Skip the file and don\'t create a new version');
+
+				dropdown.setValue(this.plugin.settings.existingFileAction);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.existingFileAction = value;
 					await this.plugin.saveSettings();
 				});
 			});
