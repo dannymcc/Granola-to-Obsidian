@@ -891,6 +891,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const report = this.generateDuplicatesReport(duplicates);
 			const duplicatesPath = 'Granola/Duplicates Report.md';
 
+			// Ensure Granola folder exists
+			let folder = this.app.vault.getFolderByPath('Granola');
+			if (!folder) {
+				try {
+					folder = await this.app.vault.createFolder('Granola');
+				} catch (error) {
+					// Folder might already exist or error creating, try to get it
+					folder = this.app.vault.getFolderByPath('Granola');
+				}
+			}
+
 			// Check if file exists
 			const existingFile = this.app.vault.getAbstractFileByPath(duplicatesPath);
 
@@ -899,11 +910,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				await this.app.vault.modify(existingFile, report);
 			} else {
 				// Create new file
-				const folder = this.app.vault.getFolderByPath('Granola');
-				if (!folder) {
-					// Create Granola folder if it doesn't exist
-					await this.app.vault.createFolder('Granola');
-				}
 				await this.app.vault.create(duplicatesPath, report);
 			}
 
