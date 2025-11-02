@@ -1574,11 +1574,12 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 
 		new obsidian.Setting(containerEl)
 			.setName('Filename word separator')
-			.setDesc('Character to separate words in filenames (underscore, hyphen, or none)')
+			.setDesc('Character to separate words in filenames (underscore, hyphen, space, or none)')
 			.addDropdown(dropdown => {
 				dropdown.addOption('_', 'Underscore (_) - Team_Standup');
 				dropdown.addOption('-', 'Hyphen (-) - Team-Standup');
-				dropdown.addOption('', 'None ( ) - TeamStandup');
+				dropdown.addOption(' ', 'Space ( ) - Team Standup');
+				dropdown.addOption('', 'None - TeamStandup');
 
 				dropdown.setValue(this.plugin.settings.filenameSeparator);
 				dropdown.onChange(async (value) => {
