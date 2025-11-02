@@ -59,9 +59,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		this.statusBarItem = this.addStatusBarItem();
 		this.updateStatusBar('Idle');
 
-		// Add ribbon icon
+		// Add ribbon icon for syncing
 		this.ribbonIconEl = this.addRibbonIcon('sync', 'Sync Granola notes', () => {
 			this.syncNotes();
+		});
+
+		// Add ribbon icon for finding duplicates
+		this.ribbonDuplicatesEl = this.addRibbonIcon('search', 'Find duplicate Granola notes', () => {
+			this.findDuplicatesAndOpen();
 		});
 
 		this.addCommand({
@@ -780,20 +785,20 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const allFiles = this.app.vault.getMarkdownFiles();
 			const granolaFiles = {};
 			const duplicates = [];
-			
+
 			// Check each file for granola-id
 			for (const file of allFiles) {
 				try {
 					const content = await this.app.vault.read(file);
 					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-					
+
 					if (frontmatterMatch) {
 						const frontmatter = frontmatterMatch[1];
 						const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
-						
+
 						if (granolaIdMatch) {
 							const granolaId = granolaIdMatch[1].trim();
-							
+
 							if (granolaFiles[granolaId]) {
 								// Found a duplicate
 								if (!duplicates.some(d => d.granolaId === granolaId)) {
@@ -815,14 +820,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					console.error('Error reading file:', file.path, error);
 				}
 			}
-			
+
 			if (duplicates.length === 0) {
 				new obsidian.Notice('No duplicate Granola notes found! 🎉');
 			} else {
-				
+
 				// Create a summary message
 				let message = `Found ${duplicates.length} set(s) of duplicate Granola notes:\n\n`;
-				
+
 				for (const duplicate of duplicates) {
 					message += `Granola ID: ${duplicate.granolaId}\n`;
 					for (const file of duplicate.files) {
@@ -830,15 +835,49 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					}
 					message += '\n';
 				}
-				
+
 				message += 'Check the console for full details. You can manually delete the duplicates you don\'t want to keep.';
-				
+
 				new obsidian.Notice(message, 10000); // Show for 10 seconds
 			}
-			
+
+			return duplicates;
+
 		} catch (error) {
 			console.error('Error finding duplicate notes:', error);
 			new obsidian.Notice('Error finding duplicate notes. Check console for details.');
+			return [];
+		}
+	}
+
+	async findDuplicatesAndOpen() {
+		try {
+			const duplicates = await this.findDuplicateNotes();
+
+			if (duplicates.length === 0) {
+				return;
+			}
+
+			// Collect all duplicate files
+			const filesToOpen = [];
+			for (const duplicate of duplicates) {
+				for (const file of duplicate.files) {
+					if (!filesToOpen.some(f => f.path === file.path)) {
+						filesToOpen.push(file);
+					}
+				}
+			}
+
+			// Open each file in a new tab
+			for (const file of filesToOpen) {
+				await this.app.workspace.getLeaf('tab').openFile(file);
+			}
+
+			new obsidian.Notice(`Opened ${filesToOpen.length} duplicate file(s) in tabs`);
+
+		} catch (error) {
+			console.error('Error opening duplicate notes in tabs:', error);
+			new obsidian.Notice('Error opening duplicate notes. Check console for details.');
 		}
 	}
 
