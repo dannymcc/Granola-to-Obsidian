@@ -862,22 +862,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		report += '# Duplicate Granola Notes\n\n';
 		report += `Found ${duplicates.length} set(s) of duplicate notes.\n\n`;
 
+		// Create single table with all duplicates
+		report += '| Granola ID | Filename | Link |\n';
+		report += '|------------|----------|------|\n';
+
 		for (let i = 0; i < duplicates.length; i++) {
 			const duplicate = duplicates[i];
-			report += `## Duplicate Set ${i + 1}: ${duplicate.granolaId}\n\n`;
-			report += '| Filename | Link |\n';
-			report += '|----------|------|\n';
 
 			for (const file of duplicate.files) {
 				const fileName = file.path;
 				const baseName = fileName.split('/').pop();
-				report += `| ${baseName} | [[${fileName}]] |\n`;
+				report += `| ${duplicate.granolaId} | ${baseName} | [[${fileName}]] |\n`;
 			}
-
-			report += '\n';
 		}
 
-		report += '## Instructions\n\n';
+		report += '\n## Instructions\n\n';
 		report += '1. **Review**: Click the links above to open and compare each duplicate\n';
 		report += '2. **Decide**: Choose which version you want to keep\n';
 		report += '3. **Delete**: Use your file explorer to delete the files you don\'t need\n';
