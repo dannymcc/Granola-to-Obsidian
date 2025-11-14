@@ -1606,7 +1606,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				// Preserve existing tags that are not person or folder tags
 				const existingTags = frontmatter.tags || [];
 				const preservedTags = existingTags.filter(tag => 
-					!tag.startsWith('person/') && !tag.startsWith('folder/')
+					attendeeTags.includes(tag) || folderTags.includes(tag)
 				);
 				
 				// Combine attendee and folder tags
