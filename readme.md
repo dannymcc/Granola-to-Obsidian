@@ -423,6 +423,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 3. Run `npm run build` to compile
 4. Copy files to your Obsidian plugins directory for testing
 
+## 👥 Contributors
+
+Thank you to all the contributors who have helped improve this plugin:
+
+- [@amscad](https://github.com/amscad) - Duplicate detection, filename customization, and CLAUDE.md
+- [@rylanfr](https://github.com/rylanfr) - Dynamic tag preservation and conditional fixes
+- [@CaptainCucumber](https://github.com/CaptainCucumber) - Transcript inclusion and date-based folders
+
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
