@@ -39,6 +39,8 @@ const DEFAULT_SETTINGS = {
 	folderTagTemplate: 'folder/{name}', // Template for folder tags
 	filenameSeparator: '_', // Character to separate words in filenames ('_', '-', or '')
 	existingFileAction: 'timestamp', // 'timestamp' - create timestamped version, 'skip' - ignore existing file
+	syncAllHistoricalNotes: false, // Sync all historical notes from Granola, not just recent ones
+	documentSyncLimit: 100, // Maximum number of documents to sync (used when syncAllHistoricalNotes is false)
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -86,6 +88,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'reorganize-granola-notes',
+			name: 'Reorganize Granola Notes into Folders',
+			callback: () => {
+				this.reorganizeExistingNotes();
+			}
+		});
+
 		this.addSettingTab(new GranolaSyncSettingTab(this.app, this));
 
 		window.setTimeout(() => {
@@ -116,13 +126,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	updateStatusBar(status, count) {
 		if (!this.statusBarItem) return;
-		
+
 		let text = 'Granola Sync: ';
-		
+
 		if (status === 'Idle') {
 			text += 'Idle';
 		} else if (status === 'Syncing') {
-			text += 'Syncing...';
+			// If count is a string, use it as a custom message
+			if (typeof count === 'string') {
+				text += count;
+			} else {
+				text += 'Syncing...';
+			}
 		} else if (status === 'Complete') {
 			text += count + ' notes synced';
 			window.setTimeout(() => {
@@ -134,7 +149,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				this.updateStatusBar('Idle');
 			}, 5000);
 		}
-		
+
 		this.statusBarItem.setText(text);
 	}
 
@@ -390,31 +405,69 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	async fetchGranolaDocuments(token) {
 		try {
-			const response = await obsidian.requestUrl({
-				url: 'https://api.granola.ai/v2/get-documents',
-				method: 'POST',
-				headers: {
-					'Authorization': 'Bearer ' + token,
-					'Content-Type': 'application/json',
-					'Accept': '*/*',
-					'User-Agent': 'Granola/5.354.0',
-					'X-Client-Version': '5.354.0'
-				},
-				body: JSON.stringify({
-					limit: 100,
-					offset: 0,
-					include_last_viewed_panel: true
-				})
-			});
+			const allDocs = [];
+			let offset = 0;
+			const batchSize = 100;
+			let hasMore = true;
 
-			const apiResponse = response.json;
-			
-			if (!apiResponse || !apiResponse.docs) {
-				console.error('API response format is unexpected');
-				return null;
+			// Determine the maximum number of documents to fetch
+			const maxDocuments = this.settings.syncAllHistoricalNotes
+				? Number.MAX_SAFE_INTEGER
+				: this.settings.documentSyncLimit;
+
+			while (hasMore && allDocs.length < maxDocuments) {
+				const response = await obsidian.requestUrl({
+					url: 'https://api.granola.ai/v2/get-documents',
+					method: 'POST',
+					headers: {
+						'Authorization': 'Bearer ' + token,
+						'Content-Type': 'application/json',
+						'Accept': '*/*',
+						'User-Agent': 'Granola/5.354.0',
+						'X-Client-Version': '5.354.0'
+					},
+					body: JSON.stringify({
+						limit: batchSize,
+						offset: offset,
+						include_last_viewed_panel: true
+					})
+				});
+
+				const apiResponse = response.json;
+
+				if (!apiResponse || !apiResponse.docs) {
+					console.error('API response format is unexpected');
+					return allDocs.length > 0 ? allDocs : null;
+				}
+
+				const docs = apiResponse.docs;
+				allDocs.push(...docs);
+
+				// Check if there are more documents to fetch
+				if (docs.length < batchSize) {
+					// Received fewer docs than requested, so we've reached the end
+					hasMore = false;
+				} else if (!this.settings.syncAllHistoricalNotes && allDocs.length >= maxDocuments) {
+					// Reached the user-specified limit
+					hasMore = false;
+				} else {
+					// More documents may be available, increment offset
+					offset += batchSize;
+				}
+
+				// Show progress for large syncs
+				if (this.settings.syncAllHistoricalNotes && allDocs.length > 100) {
+					this.updateStatusBar('Syncing', `${allDocs.length} docs fetched`);
+				}
 			}
-			
-			return apiResponse.docs;
+
+			// Trim to max documents if we went over
+			if (allDocs.length > maxDocuments) {
+				allDocs.length = maxDocuments;
+			}
+
+			console.log(`Fetched ${allDocs.length} documents from Granola`);
+			return allDocs;
 		} catch (error) {
 			console.error('Error fetching documents:', error);
 			return null;
@@ -1600,7 +1653,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const folderNames = this.extractFolderNames(doc);
 			const folderTags = this.generateFolderTags(folderNames);
 			const granolaUrl = this.generateGranolaUrl(doc.id);
-			
+
 			// Use FileManager.processFrontMatter for atomic frontmatter updates
 			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 				// Preserve existing tags that are not person or folder tags
@@ -1608,22 +1661,145 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const preservedTags = existingTags.filter(
 				    (tag) => !attendeeTags.includes(tag) && !folderTags.includes(tag)
 				);
-				
+
 				// Combine attendee and folder tags
 				const newTags = [...attendeeTags, ...folderTags];
-				
+
 				// Update tags
 				frontmatter.tags = [...preservedTags, ...newTags];
-				
+
 				// Update or add Granola URL if enabled
 				if (granolaUrl) {
 					frontmatter.granola_url = granolaUrl;
 				}
 			});
-			
+
 		} catch (error) {
 			console.error('Error updating attendee tags for existing note:', error);
 			throw error;
+		}
+	}
+
+	async reorganizeExistingNotes() {
+		try {
+			this.updateStatusBar('Syncing');
+			new obsidian.Notice('Starting reorganization of existing Granola notes...');
+
+			// Get all markdown files in the vault
+			const allFiles = this.app.vault.getMarkdownFiles();
+			const granolaFiles = [];
+
+			// Find all files with granola_id in frontmatter
+			for (const file of allFiles) {
+				try {
+					const content = await this.app.vault.read(file);
+					const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+
+					if (frontmatterMatch) {
+						const frontmatter = frontmatterMatch[1];
+						const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
+						const createdAtMatch = frontmatter.match(/created_at:\s*(.+)$/m);
+
+						if (granolaIdMatch) {
+							granolaFiles.push({
+								file: file,
+								granolaId: granolaIdMatch[1].trim(),
+								createdAt: createdAtMatch ? createdAtMatch[1].trim() : null
+							});
+						}
+					}
+				} catch (error) {
+					console.error('Error reading file for reorganization:', file.path, error);
+				}
+			}
+
+			if (granolaFiles.length === 0) {
+				new obsidian.Notice('No Granola notes found to reorganize');
+				this.updateStatusBar('Idle');
+				return;
+			}
+
+			// Fetch folders if folder support is enabled
+			let folders = null;
+			if (this.settings.enableGranolaFolders) {
+				const token = await this.loadCredentials();
+				if (token) {
+					folders = await this.fetchGranolaFolders(token);
+					if (folders) {
+						// Create a mapping of document ID to folder for quick lookup
+						this.documentToFolderMap = {};
+						for (const folder of folders) {
+							if (folder.document_ids) {
+								for (const docId of folder.document_ids) {
+									this.documentToFolderMap[docId] = folder;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			let movedCount = 0;
+			let errorCount = 0;
+
+			// Process each Granola file
+			for (const granolaFile of granolaFiles) {
+				try {
+					// Create a mock document object with the information we have
+					const mockDoc = {
+						id: granolaFile.granolaId,
+						created_at: granolaFile.createdAt
+					};
+
+					// Determine the correct target directory based on settings
+					let targetDirectory;
+					if (this.settings.enableGranolaFolders) {
+						targetDirectory = this.generateFolderBasedPath(mockDoc);
+						await this.ensureFolderBasedDirectoryExists(targetDirectory);
+					} else if (this.settings.enableDateBasedFolders) {
+						targetDirectory = this.generateDateBasedPath(mockDoc);
+						await this.ensureDateBasedDirectoryExists(targetDirectory);
+					} else {
+						targetDirectory = this.settings.syncDirectory;
+					}
+
+					// Get the current directory of the file
+					const currentDirectory = granolaFile.file.parent.path;
+
+					// Check if the file is already in the correct location
+					if (currentDirectory === targetDirectory) {
+						continue; // File is already in the right place
+					}
+
+					// Construct the new file path
+					const newFilePath = path.join(targetDirectory, granolaFile.file.name);
+
+					// Check if a file with the same name already exists in the target directory
+					const existingFile = this.app.vault.getAbstractFileByPath(newFilePath);
+					if (existingFile && existingFile.path !== granolaFile.file.path) {
+						console.warn('Cannot move file - target already exists:', newFilePath);
+						errorCount++;
+						continue;
+					}
+
+					// Move the file to the new location
+					await this.app.fileManager.renameFile(granolaFile.file, newFilePath);
+					movedCount++;
+
+				} catch (error) {
+					console.error('Error reorganizing file:', granolaFile.file.path, error);
+					errorCount++;
+				}
+			}
+
+			const message = `Reorganization complete! Moved ${movedCount} note(s). ${errorCount > 0 ? errorCount + ' error(s) occurred.' : ''}`;
+			new obsidian.Notice(message, 8000);
+			this.updateStatusBar('Idle');
+
+		} catch (error) {
+			console.error('Error during reorganization:', error);
+			new obsidian.Notice('Error during reorganization. Check console for details.');
+			this.updateStatusBar('Error', 'reorganization failed');
 		}
 	}
 }
@@ -1745,16 +1921,48 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				dropdown.addOption('3600000', 'Every 1 hour');
 				dropdown.addOption('21600000', 'Every 6 hours');
 				dropdown.addOption('86400000', 'Every 24 hours');
-				
+
 				dropdown.setValue(String(this.plugin.settings.autoSyncFrequency));
 				dropdown.onChange(async (value) => {
 					this.plugin.settings.autoSyncFrequency = parseInt(value);
 					await this.plugin.saveSettings();
-					
+
 					const label = this.plugin.getFrequencyLabel(parseInt(value));
 					new obsidian.Notice('Auto-sync updated: ' + label);
 				});
 			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Sync all historical notes')
+			.setDesc('When enabled, sync will fetch ALL notes from Granola (not just the most recent 100). This may take longer on first sync but ensures all historical notes are included.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.syncAllHistoricalNotes);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.syncAllHistoricalNotes = value;
+					await this.plugin.saveSettings();
+					this.display(); // Refresh to show/hide document limit setting
+				});
+			});
+
+		// Show document limit setting only when NOT syncing all historical notes
+		if (!this.plugin.settings.syncAllHistoricalNotes) {
+			new obsidian.Setting(containerEl)
+				.setName('Document sync limit')
+				.setDesc('Maximum number of documents to sync from Granola (most recent notes will be synced first)')
+				.addText(text => {
+					text.setPlaceholder('100');
+					text.setValue(String(this.plugin.settings.documentSyncLimit));
+					text.onChange(async (value) => {
+						const limit = parseInt(value);
+						if (!isNaN(limit) && limit > 0) {
+							this.plugin.settings.documentSyncLimit = limit;
+							await this.plugin.saveSettings();
+						} else {
+							new obsidian.Notice('Please enter a valid positive number');
+						}
+					});
+				});
+		}
 
 		new obsidian.Setting(containerEl)
 			.setName('Skip existing notes')
@@ -2098,6 +2306,17 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				button.setCta();
 				button.onClick(async () => {
 					await this.plugin.syncNotes();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Reorganize existing notes into folders')
+			.setDesc('Move all existing Granola notes into the correct folders based on your current date-based or Granola folder settings. This will not create duplicates.')
+			.addButton(button => {
+				button.setButtonText('Reorganize notes');
+				button.setCta();
+				button.onClick(async () => {
+					await this.plugin.reorganizeExistingNotes();
 				});
 			});
 
