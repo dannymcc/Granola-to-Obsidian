@@ -133,6 +133,9 @@ if enablePeriodicNoteIntegration:
    - Credit to contributors (e.g., "Thanks to @username for implementing this!")
    - References to closed issues (e.g., "Closes #25")
 9. **Manually close related issues** with a comment linking to the release
+10. **Mark the release as latest** if needed: `gh release edit X.X.X --latest`
+    - This ensures GitHub shows the correct version in the sidebar
+    - Necessary when restoring older releases or if releases are created out of order
 
 ### Obsidian Plugin Requirements
 - Release tag must **exactly match** the version in `manifest.json`
