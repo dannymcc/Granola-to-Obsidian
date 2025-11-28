@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.2] - 2025-11-28
+### Added
+- **📜 Historical Notes Sync**: New `syncAllHistoricalNotes` setting to sync all historical notes from Granola, not just recent ones
+- **📊 Document Sync Limit**: New `documentSyncLimit` setting to control maximum number of documents synced in a single operation
+- **📁 Folder Reorganization**: New command to reorganize existing Granola notes into new folder structures
+- **💬 Enhanced Status Updates**: Improved status bar updates with custom message support
+
+### Fixed
+- Resolves [#25](https://github.com/dannymcc/Granola-to-Obsidian/issues/25): Not syncing full history of Granola notes
+- Resolves [#18](https://github.com/dannymcc/Granola-to-Obsidian/issues/18): Incomplete/Partial Sync
+
+### Contributors
+- Special thanks to [@andrewsong-tech](https://github.com/andrewsong-tech) for implementing these features!
+
+## [1.7.1] - 2025-11-16
+### Added
+- **👥 Contributors Section**: Added contributors section to README to recognize community contributions
+
+### Enhanced
+- **Documentation**: Improved documentation for all features
+
+## [1.7.0] - 2025-11-03
+### Added
+- **🔍 Duplicate Note Detection**: New "Find Duplicate Granola Notes" command to identify and review duplicate syncs
+- **🛡️ Smart File Conflict Handling**: New option to either skip or timestamp files when naming conflicts occur
+- **🎨 Customizable Filename Separators**: Choose between underscores, dashes, or no separators between words in filenames
+- **📁 Granola Folder Organization**: Mirror your Granola folder structure in Obsidian with automatic folder-based tagging
+- **🏷️ Folder Tag Templates**: Customize how folder hierarchy becomes tags (e.g., `folder/{name}`)
+
+### Fixed
+- Resolves [#16](https://github.com/dannymcc/Granola-to-Obsidian/issues/16): Request for customizable filename separators
+- Resolves [#20](https://github.com/dannymcc/Granola-to-Obsidian/issues/20): File conflict handling improvements
+- Resolves [#23](https://github.com/dannymcc/Granola-to-Obsidian/issues/23): Granola folder structure support
+- Dynamic tag preservation to prevent tag duplication with custom attendee tag prefixes (thanks [@rylanfr](https://github.com/rylanfr))
+
+### Contributors
+- Special thanks to [@amscad](https://github.com/amscad) for implementing duplicate detection, file handling improvements, and folder organization features!
+- Thanks to [@rylanfr](https://github.com/rylanfr) for the dynamic tag preservation fix!
+
 ## [1.6.0]
 ### Added
 - **🗓️ Periodic Notes Integration**: New support for the Periodic Notes plugin alongside existing Daily Notes integration
