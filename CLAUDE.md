@@ -92,20 +92,47 @@ if enablePeriodicNoteIntegration:
 
 **Important**: This project has a strict, automated release workflow. See `.claude_rules` for full details.
 
+### ⚠️ Critical Release Rules
+
+**NEVER delete existing release tags or releases!** Users may need to downgrade to previous versions. If a release was created incorrectly:
+- Create a NEW version with the next version number
+- Do NOT delete and recreate the same version
+- Example: If 1.7.1 exists and needs changes, create 1.7.2 instead
+
+**ALWAYS update CHANGELOG.md before creating a release:**
+- Add a new entry for the version at the top of CHANGELOG.md
+- Include the date, features, fixes, and contributors
+- Commit and push the CHANGELOG.md update
+- Then create the version tag
+
+**Author attribution:**
+- All commits should be authored by the repository owner (dannymcc)
+- The git config is already set up correctly
+- Co-Authored-By trailer in commit messages is appropriate
+
 ### Version Management
 - **Format**: Semantic versioning without "v" prefix (e.g., `1.6.3`)
 - Update both `manifest.json` and `versions.json` when bumping versions
+- Update `CHANGELOG.md` with detailed release notes BEFORE creating the tag
 - Version badge in `readme.md` is auto-updated by CI/CD
 
 ### Release Workflow (Automated via GitHub Actions)
-1. Create a git tag with **only the version number** (no "v" prefix): `git tag 1.6.3`
-2. Push the tag: `git push origin 1.6.3`
-3. GitHub Actions workflow (`release.yml`) automatically:
-   - Updates `manifest.json` version
+1. **Update CHANGELOG.md** with the new version's changes (required!)
+2. Update `manifest.json` and `versions.json` with the new version number
+3. Commit and push these changes
+4. Create a git tag with **only the version number** (no "v" prefix): `git tag 1.6.3`
+5. Push the tag: `git push origin 1.6.3`
+6. GitHub Actions workflow (`release.yml`) automatically:
+   - Updates `manifest.json` version (if needed)
    - Updates `readme.md` version badge
    - Creates a GitHub release with properly formatted notes
    - Attaches plugin files as individual assets
-4. **Never manually upload release assets** - the workflow does this
+7. **Never manually upload release assets** - the workflow does this
+8. **Edit the release notes** on GitHub to include:
+   - Detailed feature descriptions from CHANGELOG.md
+   - Credit to contributors (e.g., "Thanks to @username for implementing this!")
+   - References to closed issues (e.g., "Closes #25")
+9. **Manually close related issues** with a comment linking to the release
 
 ### Obsidian Plugin Requirements
 - Release tag must **exactly match** the version in `manifest.json`
