@@ -108,7 +108,8 @@ if enablePeriodicNoteIntegration:
 **Author attribution:**
 - All commits should be authored by the repository owner (dannymcc)
 - The git config is already set up correctly
-- Co-Authored-By trailer in commit messages is appropriate
+- **Do NOT include Co-Authored-By trailers** in commit messages
+- Commit messages should be clean and professional without AI attribution
 
 ### Version Management
 - **Format**: Semantic versioning without "v" prefix (e.g., `1.6.3`)
