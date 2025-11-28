@@ -430,6 +430,7 @@ Thank you to all the contributors who have helped improve this plugin:
 - [@amscad](https://github.com/amscad) - Duplicate detection, filename customization, and CLAUDE.md
 - [@rylanfr](https://github.com/rylanfr) - Dynamic tag preservation and conditional fixes
 - [@CaptainCucumber](https://github.com/CaptainCucumber) - Transcript inclusion and date-based folders
+- [@andrewsong-tech](https://github.com/andrewsong-tech) - Historical notes sync and folder reorganization
 
 ## 📝 License
 
