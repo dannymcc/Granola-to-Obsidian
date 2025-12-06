@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS = {
 	dailyNoteSectionName: '## Granola Meetings',
 	enablePeriodicNoteIntegration: false,
 	periodicNoteSectionName: '## Granola Meetings',
-	skipExistingNotes: false,
+	skipExistingNotes: true,
 	includeAttendeeTags: false,
 	excludeMyNameFromTags: true,
 	myName: 'Danny McClelland',
@@ -1185,7 +1185,24 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		let finalFilepath = filepath;
 		const existingFileByName = this.app.vault.getAbstractFileByPath(filepath);
 		if (existingFileByName) {
-			// Handle existing file based on user's preference
+			// Check if this file has the same granola_id - if so, it's the same note
+			// This catches cases where findExistingNoteByGranolaId missed it due to search scope
+			try {
+				const existingContent = await this.app.vault.read(existingFileByName);
+				const frontmatterMatch = existingContent.match(/^---\n([\s\S]*?)\n---/);
+				if (frontmatterMatch) {
+					const granolaIdMatch = frontmatterMatch[1].match(/granola_id:\s*(.+)$/m);
+					if (granolaIdMatch && granolaIdMatch[1].trim() === docId) {
+						// Same granola_id - update the existing file instead of creating duplicate
+						await this.app.vault.modify(existingFileByName, finalMarkdown);
+						return true;
+					}
+				}
+			} catch (error) {
+				console.error('Error checking existing file for granola_id:', error);
+			}
+
+			// Different file with same name - handle based on user's preference
 			if (this.settings.existingFileAction === 'skip') {
 				// Skip creating a new file if one with the same name exists
 				return false;
@@ -1336,44 +1353,93 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	async getDailyNote() {
 		try {
-			// Try to get today's daily note using a simpler approach
 			const today = new Date();
-			const todayFormatted = today.toISOString().split('T')[0]; // YYYY-MM-DD format
-			
-			// Generate various date formats to search for
+
+			// Try to get Daily Notes plugin settings from Obsidian
+			const dailyNotesPlugin = this.app.internalPlugins.getPluginById('daily-notes');
+			if (dailyNotesPlugin?.enabled) {
+				const dailyNotesSettings = dailyNotesPlugin.instance?.options || {};
+				const dateFormat = dailyNotesSettings.format || 'YYYY-MM-DD';
+				const folder = dailyNotesSettings.folder || '';
+
+				// Format today's date using the configured format
+				const todayFormatted = this.formatDateWithPattern(today, dateFormat);
+
+				// Build the expected path
+				const expectedPath = folder
+					? `${folder}/${todayFormatted}.md`
+					: `${todayFormatted}.md`;
+
+				// Try to get the file directly by path
+				const dailyNote = this.app.vault.getAbstractFileByPath(expectedPath);
+				if (dailyNote) {
+					return dailyNote;
+				}
+
+				// Fallback: search for file by exact basename match
+				const files = this.app.vault.getMarkdownFiles();
+				const matchedFile = files.find(f => f.basename === todayFormatted);
+				if (matchedFile) {
+					return matchedFile;
+				}
+			}
+
+			// Fallback for when Daily Notes plugin is disabled: use legacy fuzzy matching
 			const year = today.getFullYear();
 			const month = String(today.getMonth() + 1).padStart(2, '0');
 			const day = String(today.getDate()).padStart(2, '0');
-			
-			// Common date formats in daily notes
+
 			const searchFormats = [
 				`${day}-${month}-${year}`, // DD-MM-YYYY
-				`${year}-${month}-${day}`, // YYYY-MM-DD  
+				`${year}-${month}-${day}`, // YYYY-MM-DD
 				`${month}-${day}-${year}`, // MM-DD-YYYY
 				`${day}.${month}.${year}`, // DD.MM.YYYY
 				`${year}/${month}/${day}`, // YYYY/MM/DD
 				`${day}/${month}/${year}`, // DD/MM/YYYY
 			];
-			
-			// Search through all files in the vault to find today's daily note
+
 			const files = this.app.vault.getMarkdownFiles();
-			
+
 			for (const file of files) {
-				// Check if this file is in the daily notes structure and matches any of today's date formats
 				if (file.path.includes('Daily')) {
-					for (const dateFormat of searchFormats) {
-						if (file.path.includes(dateFormat)) {
+					for (const format of searchFormats) {
+						if (file.path.includes(format)) {
 							return file;
 						}
 					}
 				}
 			}
-			
+
 			return null;
 		} catch (error) {
 			console.error('Error getting daily note:', error);
 			return null;
 		}
+	}
+
+	formatDateWithPattern(date, pattern) {
+		const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+		const dayNamesFull = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+		const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+		const monthNamesFull = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+		const year = date.getFullYear();
+		const month = date.getMonth();
+		const day = date.getDate();
+		const dayOfWeek = date.getDay();
+
+		// Order matters: replace longer patterns first to avoid partial matches
+		return pattern
+			.replace(/YYYY/g, year)
+			.replace(/YY/g, String(year).slice(-2))
+			.replace(/MMMM/g, monthNamesFull[month])
+			.replace(/MMM/g, monthNames[month])
+			.replace(/MM/g, String(month + 1).padStart(2, '0'))
+			.replace(/M(?![ao])/g, String(month + 1))
+			.replace(/dddd/g, dayNamesFull[dayOfWeek])
+			.replace(/ddd/g, dayNames[dayOfWeek])
+			.replace(/DD/g, String(day).padStart(2, '0'))
+			.replace(/D(?![ae])/g, String(day));
 	}
 
 	isPeriodicNotesPluginAvailable() {

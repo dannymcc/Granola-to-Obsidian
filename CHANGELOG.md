@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.3] - 2025-12-06
+### Fixed
+- **🗓️ Daily Note Integration**: Fixed daily note detection for custom date formats including day-of-week suffixes (e.g., `YYYY-MM-DD-ddd` producing `2025-12-06-Sat`)
+  - Now reads date format and folder settings directly from Obsidian's Daily Notes core plugin
+  - Supports all moment.js date format tokens: `YYYY`, `YY`, `MMMM`, `MMM`, `MM`, `M`, `dddd`, `ddd`, `DD`, `D`
+  - Falls back to legacy matching for users without Daily Notes plugin enabled
+- **🔄 Duplicate Note Prevention**: Fixed issue where duplicate notes were created on every sync
+  - Changed `skipExistingNotes` default to `true` for new installations
+  - Added secondary `granola_id` check when filename collisions occur to prevent duplicates even when search scope misses the original file
+
+### Resolves
+- Fixes [#30](https://github.com/dannymcc/Granola-to-Obsidian/issues/30): Daily Note integration not working with YYYY-MM-DD-ddd date format
+
 ## [1.7.2] - 2025-11-28
 ### Added
 - **📜 Historical Notes Sync**: New `syncAllHistoricalNotes` setting to sync all historical notes from Granola, not just recent ones
