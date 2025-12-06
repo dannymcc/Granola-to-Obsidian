@@ -5,7 +5,7 @@
 
 An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai) meeting notes to your Obsidian vault with full customization options and real-time status updates.
 
-![Granola Sync Plugin](https://img.shields.io/badge/Obsidian-Plugin-purple) ![Version](https://img.shields.io/badge/version-1.7.2-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![Granola Sync Plugin](https://img.shields.io/badge/Obsidian-Plugin-purple) ![Version](https://img.shields.io/badge/version-1.7.3-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ![Granola Sync](https://i.imgur.com/EmFRYTO.png)
 
