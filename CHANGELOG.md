@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2025-12-22
+### Added
+- **📝 My Notes Support**: New option to include your personal "My Notes" content from Granola under a dedicated "## My Notes" section
+- **🤖 Enhanced Notes Control**: New option to control whether AI-generated Enhanced Notes are included (enabled by default)
+- **🎯 Folder Filtering**: New feature to selectively sync only notes from specific Granola folders
+  - Enable folder filter toggle to activate filtering
+  - Refresh folder list from Granola API
+  - Select/deselect individual folders with checkboxes
+  - "Select All" and "Deselect All" buttons for convenience
+- **📋 Note Content Settings**: New organized settings section for controlling what content appears in synced notes
+
+### Fixed
+- **🐛 Notes Without Enhanced Notes**: Fixed issue where notes without AI-generated enhanced notes would fail to sync entirely
+  - Notes will now sync if they have My Notes, Enhanced Notes, or Transcript content
+  - Gracefully handles missing content types instead of failing silently
+
+### Enhanced
+- **Transcript Heading**: Changed transcript section heading from "# Transcript" to "## Transcript" for consistent hierarchy
+- **API Enhancement**: Now requests additional panel data from Granola API for My Notes support
+- **Settings Organization**: Improved settings UI with clear section headings for Note Content, Filename Settings, etc.
+
+### Resolves
+- Fixes [#32](https://github.com/dannymcc/Granola-to-Obsidian/issues/32): Notes without enhanced notes fail to export
+- Fixes [#31](https://github.com/dannymcc/Granola-to-Obsidian/issues/31): Select folders to sync
+- Fixes [#27](https://github.com/dannymcc/Granola-to-Obsidian/issues/27): Include full transcript (setting now properly initialized in defaults)
+- Fixes [#17](https://github.com/dannymcc/Granola-to-Obsidian/issues/17): Sync 'My Notes' and 'Enhanced Notes' under different headers
+
 ## [1.7.3] - 2025-12-06
 ### Fixed
 - **🗓️ Daily Note Integration**: Fixed daily note detection for custom date formats including day-of-week suffixes (e.g., `YYYY-MM-DD-ddd` producing `2025-12-06-Sat`)

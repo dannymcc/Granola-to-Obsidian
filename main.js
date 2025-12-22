@@ -41,6 +41,11 @@ const DEFAULT_SETTINGS = {
 	existingFileAction: 'timestamp', // 'timestamp' - create timestamped version, 'skip' - ignore existing file
 	syncAllHistoricalNotes: false, // Sync all historical notes from Granola, not just recent ones
 	documentSyncLimit: 100, // Maximum number of documents to sync (used when syncAllHistoricalNotes is false)
+	includeFullTranscript: false, // Include full meeting transcript in notes
+	includeMyNotes: true, // Include "My Notes" section from Granola
+	includeEnhancedNotes: true, // Include "Enhanced Notes" (AI summary) from Granola
+	selectedGranolaFolders: [], // Array of Granola folder IDs to sync (empty = sync all)
+	enableFolderFilter: false, // Enable filtering by Granola folders
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -264,13 +269,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				return;
 			}
 
-			// Fetch folders if folder support is enabled
+			// Fetch folders if folder support or folder filtering is enabled
 			let folders = null;
-			if (this.settings.enableGranolaFolders) {
+			if (this.settings.enableGranolaFolders || this.settings.enableFolderFilter) {
 				folders = await this.fetchGranolaFolders(token);
 				if (folders) {
 					// Create a mapping of document ID to folder for quick lookup
 					this.documentToFolderMap = {};
+					// Also store all available folders for the settings UI
+					this.availableGranolaFolders = folders;
 					for (const folder of folders) {
 						if (folder.document_ids) {
 							for (const docId of folder.document_ids) {
@@ -281,12 +288,27 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 
+			// Filter documents by selected folders if folder filtering is enabled
+			let documentsToSync = documents;
+			if (this.settings.enableFolderFilter && this.settings.selectedGranolaFolders.length > 0 && this.documentToFolderMap) {
+				documentsToSync = documents.filter(doc => {
+					const folder = this.documentToFolderMap[doc.id];
+					if (!folder) {
+						// Document is not in any folder - check if user wants to include "unfiled" docs
+						return false;
+					}
+					// Check if the folder ID is in the selected folders list
+					return this.settings.selectedGranolaFolders.includes(folder.id);
+				});
+				console.log(`Folder filter: syncing ${documentsToSync.length} of ${documents.length} documents`);
+			}
+
 			let syncedCount = 0;
 			const todaysNotes = [];
 			const today = new Date().toDateString();
 
-			for (let i = 0; i < documents.length; i++) {
-				const doc = documents[i];
+			for (let i = 0; i < documentsToSync.length; i++) {
+				const doc = documentsToSync[i];
 				try {
 					// Fetch transcript if enabled
 					if (this.settings.includeFullTranscript) {
@@ -429,7 +451,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					body: JSON.stringify({
 						limit: batchSize,
 						offset: offset,
-						include_last_viewed_panel: true
+						include_last_viewed_panel: true,
+						include_panels: true
 					})
 				});
 
@@ -1023,29 +1046,107 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
+	/**
+	 * Extracts content from document panels by type.
+	 * Granola stores different content types in panels: 'my_notes', 'enhanced_notes', etc.
+	 * @param {Object} doc - The document object
+	 * @param {string} panelType - The type of panel to extract ('my_notes', 'enhanced_notes')
+	 * @returns {Object|null} The panel content or null if not found
+	 */
+	extractPanelContent(doc, panelType) {
+		// First check the panels array if available
+		if (doc.panels && Array.isArray(doc.panels)) {
+			for (const panel of doc.panels) {
+				if (panel.type === panelType && panel.content && panel.content.type === 'doc') {
+					return panel.content;
+				}
+			}
+		}
+
+		// Fallback: check last_viewed_panel for enhanced notes
+		if (panelType === 'enhanced_notes' && doc.last_viewed_panel &&
+			doc.last_viewed_panel.content && doc.last_viewed_panel.content.type === 'doc') {
+			return doc.last_viewed_panel.content;
+		}
+
+		return null;
+	}
+
+	/**
+	 * Builds the note content from available sections.
+	 * Includes My Notes, Enhanced Notes, and Transcript based on settings and availability.
+	 * @param {Object} doc - The document object
+	 * @param {string} transcript - The transcript markdown (if fetched)
+	 * @returns {string} The combined markdown content
+	 */
+	buildNoteContent(doc, transcript) {
+		const sections = [];
+		const noteTitle = this.generateNoteTitle(doc);
+
+		// Add main title
+		sections.push('# ' + noteTitle);
+
+		// Extract My Notes content
+		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
+		if (myNotesContent && this.settings.includeMyNotes) {
+			const myNotesMarkdown = this.convertProseMirrorToMarkdown(myNotesContent);
+			if (myNotesMarkdown && myNotesMarkdown.trim()) {
+				sections.push('\n## My Notes\n\n' + myNotesMarkdown.trim());
+			}
+		}
+
+		// Extract Enhanced Notes content
+		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
+		if (enhancedNotesContent && this.settings.includeEnhancedNotes) {
+			const enhancedNotesMarkdown = this.convertProseMirrorToMarkdown(enhancedNotesContent);
+			if (enhancedNotesMarkdown && enhancedNotesMarkdown.trim()) {
+				// If we have My Notes, add Enhanced Notes as a separate section
+				if (myNotesContent && this.settings.includeMyNotes) {
+					sections.push('\n## Enhanced Notes\n\n' + enhancedNotesMarkdown.trim());
+				} else {
+					// If no My Notes, just add the enhanced notes content directly
+					sections.push('\n' + enhancedNotesMarkdown.trim());
+				}
+			}
+		}
+
+		// Add transcript section if enabled and available
+		if (this.settings.includeFullTranscript && transcript && transcript !== 'no_transcript') {
+			sections.push('\n## Transcript\n\n' + transcript);
+		}
+
+		return sections.join('\n');
+	}
+
 	async processDocument(doc) {
 	try {
 		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
 		const transcript = doc.transcript || 'no_transcript';
 
-		let contentToParse = null;
-		if (doc.last_viewed_panel && doc.last_viewed_panel.content && doc.last_viewed_panel.content.type === 'doc') {
-			contentToParse = doc.last_viewed_panel.content;
-		}
+		// Extract all available content
+		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
+		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
+		const hasTranscript = this.settings.includeFullTranscript && transcript && transcript !== 'no_transcript';
 
-		if (!contentToParse) {
+		// Check if there's any content to process
+		const hasMyNotes = myNotesContent && this.settings.includeMyNotes;
+		const hasEnhancedNotes = enhancedNotesContent && this.settings.includeEnhancedNotes;
+
+		// If no content is available at all, skip this document
+		if (!hasMyNotes && !hasEnhancedNotes && !hasTranscript) {
+			console.log('Skipping document "' + title + '" - no content available (no enhanced notes, my notes, or transcript)');
 			return false;
 		}
 
 		// Check if note already exists by Granola ID
 		const existingFile = await this.findExistingNoteByGranolaId(docId);
-		
+
 		if (existingFile) {
 			if (this.settings.skipExistingNotes && !this.settings.includeAttendeeTags && !this.settings.includeGranolaUrl) {
 				return true; // Return true so it counts as "synced" but we don't update
 			}
-			
+
 			if (this.settings.skipExistingNotes && (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl)) {
 				// Only update metadata (tags, URLs), preserve existing content
 				try {
@@ -1059,19 +1160,16 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 			// Update existing note (full update)
 			try {
-				const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
-
 				// Extract attendee information
 				const attendeeNames = this.extractAttendeeNames(doc);
 				const attendeeTags = this.generateAttendeeTags(attendeeNames);
-				
+
 				// Extract folder information
 				const folderNames = this.extractFolderNames(doc);
 				const folderTags = this.generateFolderTags(folderNames);
-				
+
 				// Generate Granola URL
 				const granolaUrl = this.generateGranolaUrl(docId);
-				
 
 				// Combine all tags
 				const allTags = [...attendeeTags, ...folderTags];
@@ -1081,18 +1179,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				frontmatter += 'granola_id: ' + docId + '\n';
 				const escapedTitle = title.replace(/"/g, '\\"');
 				frontmatter += 'title: "' + escapedTitle + '"\n';
-				
+
 				if (granolaUrl) {
 					frontmatter += 'granola_url: "' + granolaUrl + '"\n';
 				}
-				
+
 				if (doc.created_at) {
 					frontmatter += 'created_at: ' + doc.created_at + '\n';
 				}
 				if (doc.updated_at) {
 					frontmatter += 'updated_at: ' + doc.updated_at + '\n';
 				}
-				
+
 				// Add all tags if any were found
 				if (allTags.length > 0) {
 					frontmatter += 'tags:\n';
@@ -1100,17 +1198,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						frontmatter += '  - ' + tag + '\n';
 					}
 				}
-				
+
 				frontmatter += '---\n\n';
 
-				// Use the note title (clean, with proper spacing) for the heading
-				const noteTitle = this.generateNoteTitle(doc);
-				let finalMarkdown = frontmatter + '# ' + noteTitle + '\n\n' + markdownContent;
-				// Add transcript section if enabled and transcript is available
-				if (this.settings.includeFullTranscript) {
-					finalMarkdown += '\n\n# Transcript\n\n' + transcript;
-				}
-				
+				// Build the note content with all sections
+				const noteContent = this.buildNoteContent(doc, transcript);
+				const finalMarkdown = frontmatter + noteContent;
+
 				await this.app.vault.process(existingFile, () => finalMarkdown);
 				return true;
 			} catch (updateError) {
@@ -1120,19 +1214,16 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		// Create new note
-		const markdownContent = this.convertProseMirrorToMarkdown(contentToParse);
-		
 		// Extract attendee information
 		const attendeeNames = this.extractAttendeeNames(doc);
 		const attendeeTags = this.generateAttendeeTags(attendeeNames);
-		
+
 		// Extract folder information
 		const folderNames = this.extractFolderNames(doc);
 		const folderTags = this.generateFolderTags(folderNames);
-		
+
 		// Generate Granola URL
 		const granolaUrl = this.generateGranolaUrl(docId);
-		
 
 		// Combine all tags
 		const allTags = [...attendeeTags, ...folderTags];
@@ -1141,18 +1232,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		frontmatter += 'granola_id: ' + docId + '\n';
 		const escapedTitle = title.replace(/"/g, '\\"');
 		frontmatter += 'title: "' + escapedTitle + '"\n';
-		
+
 		if (granolaUrl) {
 			frontmatter += 'granola_url: "' + granolaUrl + '"\n';
 		}
-		
+
 		if (doc.created_at) {
 			frontmatter += 'created_at: ' + doc.created_at + '\n';
 		}
 		if (doc.updated_at) {
 			frontmatter += 'updated_at: ' + doc.updated_at + '\n';
 		}
-		
+
 		// Add all tags if any were found
 		if (allTags.length > 0) {
 			frontmatter += 'tags:\n';
@@ -1160,14 +1251,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				frontmatter += '  - ' + tag + '\n';
 			}
 		}
-		
+
 		frontmatter += '---\n\n';
 
-		let finalMarkdown = frontmatter + markdownContent;
-		// Add transcript section if enabled and transcript is available
-		if (this.settings.includeFullTranscript) {
-			finalMarkdown += '\n\n# Transcript\n\n' + transcript;
-		}
+		// Build the note content with all sections
+		const noteContent = this.buildNoteContent(doc, transcript);
+		const finalMarkdown = frontmatter + noteContent;
 
 		const filename = this.generateFilename(doc) + '.md';
 		// Use folder-based path if enabled, otherwise date-based, otherwise sync directory
@@ -1922,9 +2011,34 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 			});
 
 
+		// Create a heading for note content settings
+		containerEl.createEl('h3', {text: 'Note content'});
+
+		new obsidian.Setting(containerEl)
+			.setName('Include My Notes')
+			.setDesc('Include your personal notes from Granola in a "## My Notes" section. These are the notes you write yourself during meetings.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.includeMyNotes);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.includeMyNotes = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Include Enhanced Notes')
+			.setDesc('Include AI-generated enhanced notes from Granola in a "## Enhanced Notes" section. These are the AI summaries Granola creates.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.includeEnhancedNotes);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.includeEnhancedNotes = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
 		new obsidian.Setting(containerEl)
 			.setName('Include full transcript')
-			.setDesc('Include the full meeting transcript in each note under a "# Transcript" section. This requires an additional API call per note and may slow down sync.')
+			.setDesc('Include the full meeting transcript in each note under a "## Transcript" section. This requires an additional API call per note and may slow down sync.')
 			.addToggle(toggle => {
 				toggle.setValue(this.plugin.settings.includeFullTranscript);
 				toggle.onChange(async (value) => {
@@ -1932,6 +2046,9 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		// Create a heading for filename settings
+		containerEl.createEl('h3', {text: 'Filename settings'});
 
 		new obsidian.Setting(containerEl)
 			.setName('Filename template')
@@ -2289,20 +2406,8 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 		// Create a heading for Granola folders
 		containerEl.createEl('h3', {text: 'Granola folders'});
 
-		// Debug: Add a simple test toggle first
+		// Use a button-based approach for the folder toggle
 		new obsidian.Setting(containerEl)
-			.setName('Test toggle (should work)')
-			.setDesc('This is a test toggle to verify toggle functionality works')
-			.addToggle(toggle => {
-				toggle.setValue(false);
-				toggle.onChange(async (value) => {
-					console.log('Test toggle changed to:', value);
-					new obsidian.Notice('Test toggle works! Value: ' + value);
-				});
-			});
-
-		// Replace the problematic toggle with a button-based approach
-		const folderSetting = new obsidian.Setting(containerEl)
 			.setName('Enable Granola folders')
 			.setDesc('Organize notes into folders based on Granola folder structure. This will create subfolders in your sync directory for each Granola folder.')
 			.addButton(button => {
@@ -2348,6 +2453,123 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 			});
+
+		// Folder filtering settings
+		containerEl.createEl('h4', {text: 'Folder filtering'});
+
+		new obsidian.Setting(containerEl)
+			.setName('Enable folder filter')
+			.setDesc('Only sync notes from selected Granola folders. When disabled, all notes are synced.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.enableFolderFilter);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.enableFolderFilter = value;
+					await this.plugin.saveSettings();
+					this.display(); // Refresh to show/hide folder selection
+				});
+			});
+
+		// Show folder selection only when folder filtering is enabled
+		if (this.plugin.settings.enableFolderFilter) {
+			// Create a button to fetch available folders
+			new obsidian.Setting(containerEl)
+				.setName('Refresh folder list')
+				.setDesc('Fetch the latest list of folders from Granola')
+				.addButton(button => {
+					button.setButtonText('Refresh folders');
+					button.onClick(async () => {
+						try {
+							const token = await this.plugin.loadCredentials();
+							if (!token) {
+								new obsidian.Notice('Could not load credentials. Please check your auth key path.');
+								return;
+							}
+							const folders = await this.plugin.fetchGranolaFolders(token);
+							if (folders) {
+								this.plugin.availableGranolaFolders = folders;
+								new obsidian.Notice(`Found ${folders.length} folders`);
+								this.display(); // Refresh to show updated folders
+							} else {
+								new obsidian.Notice('Could not fetch folders from Granola');
+							}
+						} catch (error) {
+							console.error('Error fetching folders:', error);
+							new obsidian.Notice('Error fetching folders. Check console for details.');
+						}
+					});
+				});
+
+			// Show available folders with checkboxes
+			const availableFolders = this.plugin.availableGranolaFolders || [];
+			if (availableFolders.length > 0) {
+				const folderSelectionEl = containerEl.createEl('div', { cls: 'setting-item' });
+				const folderInfoEl = folderSelectionEl.createEl('div', { cls: 'setting-item-info' });
+				const folderNameEl = folderInfoEl.createEl('div', { cls: 'setting-item-name' });
+				folderNameEl.setText('Select folders to sync');
+				const folderDescEl = folderInfoEl.createEl('div', { cls: 'setting-item-description' });
+				folderDescEl.setText('Check the folders you want to sync. Only notes in selected folders will be synced.');
+
+				const folderListEl = containerEl.createEl('div', { cls: 'granola-folder-list' });
+				folderListEl.style.marginLeft = '20px';
+				folderListEl.style.marginBottom = '20px';
+
+				for (const folder of availableFolders) {
+					const folderItemEl = folderListEl.createEl('div', { cls: 'granola-folder-item' });
+					folderItemEl.style.display = 'flex';
+					folderItemEl.style.alignItems = 'center';
+					folderItemEl.style.marginBottom = '8px';
+
+					const checkbox = folderItemEl.createEl('input', { type: 'checkbox' });
+					checkbox.checked = this.plugin.settings.selectedGranolaFolders.includes(folder.id);
+					checkbox.style.marginRight = '8px';
+
+					const label = folderItemEl.createEl('label');
+					label.setText(folder.title + (folder.document_ids ? ` (${folder.document_ids.length} notes)` : ''));
+					label.style.cursor = 'pointer';
+
+					checkbox.addEventListener('change', async () => {
+						if (checkbox.checked) {
+							if (!this.plugin.settings.selectedGranolaFolders.includes(folder.id)) {
+								this.plugin.settings.selectedGranolaFolders.push(folder.id);
+							}
+						} else {
+							this.plugin.settings.selectedGranolaFolders = this.plugin.settings.selectedGranolaFolders.filter(id => id !== folder.id);
+						}
+						await this.plugin.saveSettings();
+					});
+
+					label.addEventListener('click', () => {
+						checkbox.click();
+					});
+				}
+
+				// Add "Select All" / "Deselect All" buttons
+				const buttonContainer = containerEl.createEl('div');
+				buttonContainer.style.marginBottom = '20px';
+
+				const selectAllBtn = buttonContainer.createEl('button');
+				selectAllBtn.setText('Select All');
+				selectAllBtn.style.marginRight = '10px';
+				selectAllBtn.addEventListener('click', async () => {
+					this.plugin.settings.selectedGranolaFolders = availableFolders.map(f => f.id);
+					await this.plugin.saveSettings();
+					this.display();
+				});
+
+				const deselectAllBtn = buttonContainer.createEl('button');
+				deselectAllBtn.setText('Deselect All');
+				deselectAllBtn.addEventListener('click', async () => {
+					this.plugin.settings.selectedGranolaFolders = [];
+					await this.plugin.saveSettings();
+					this.display();
+				});
+			} else {
+				const noFoldersEl = containerEl.createEl('div', { cls: 'setting-item' });
+				const noFoldersInfoEl = noFoldersEl.createEl('div', { cls: 'setting-item-info' });
+				const noFoldersDescEl = noFoldersInfoEl.createEl('div', { cls: 'setting-item-description' });
+				noFoldersDescEl.setText('No folders loaded. Click "Refresh folders" to fetch available folders from Granola, or run a sync first.');
+			}
+		}
 
 		// Create a heading for file organization settings
 		containerEl.createEl('h3', {text: 'File organization'});
