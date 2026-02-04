@@ -46,6 +46,7 @@ const DEFAULT_SETTINGS = {
 	includeEnhancedNotes: true, // Include "Enhanced Notes" (AI summary) from Granola
 	selectedGranolaFolders: [], // Array of Granola folder IDs to sync (empty = sync all)
 	enableFolderFilter: false, // Enable filtering by Granola folders
+	enableAutoReorganize: false, // Automatically reorganize notes after sync
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -360,7 +361,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 
 			this.updateStatusBar('Complete', syncedCount);
-			
+
+			// Auto-reorganize if enabled
+			if (this.settings.enableAutoReorganize &&
+				(this.settings.enableGranolaFolders || this.settings.enableDateBasedFolders)) {
+				try {
+					await this.reorganizeExistingNotes(true); // quiet mode
+				} catch (error) {
+					console.error('Auto-reorganization failed:', error);
+				}
+			}
+
 		} catch (error) {
 			console.error('Granola sync failed:', error);
 			this.updateStatusBar('Error', 'sync failed');
@@ -1835,10 +1846,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async reorganizeExistingNotes() {
+	async reorganizeExistingNotes(quiet = false) {
 		try {
 			this.updateStatusBar('Syncing');
-			new obsidian.Notice('Starting reorganization of existing Granola notes...');
+			if (!quiet) {
+				new obsidian.Notice('Starting reorganization of existing Granola notes...');
+			}
 
 			// Get all markdown files in the vault
 			const allFiles = this.app.vault.getMarkdownFiles();
@@ -1869,7 +1882,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 
 			if (granolaFiles.length === 0) {
-				new obsidian.Notice('No Granola notes found to reorganize');
+				if (!quiet) {
+					new obsidian.Notice('No Granola notes found to reorganize');
+				}
 				this.updateStatusBar('Idle');
 				return;
 			}
@@ -1947,13 +1962,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 
-			const message = `Reorganization complete! Moved ${movedCount} note(s). ${errorCount > 0 ? errorCount + ' error(s) occurred.' : ''}`;
-			new obsidian.Notice(message, 8000);
+			if (!quiet) {
+				const message = `Reorganization complete! Moved ${movedCount} note(s). ${errorCount > 0 ? errorCount + ' error(s) occurred.' : ''}`;
+				new obsidian.Notice(message, 8000);
+			}
+			// Always log to console for debugging
+			if (movedCount > 0 || errorCount > 0) {
+				console.log(`Reorganization: Moved ${movedCount} note(s), ${errorCount} error(s)`);
+			}
 			this.updateStatusBar('Idle');
 
 		} catch (error) {
 			console.error('Error during reorganization:', error);
-			new obsidian.Notice('Error during reorganization. Check console for details.');
+			if (!quiet) {
+				new obsidian.Notice('Error during reorganization. Check console for details.');
+			}
 			this.updateStatusBar('Error', 'reorganization failed');
 		}
 	}
@@ -2166,6 +2189,7 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				toggle.onChange(async (value) => {
 					this.plugin.settings.enableDateBasedFolders = value;
 					await this.plugin.saveSettings();
+					this.display(); // Refresh to update auto-reorganize toggle state
 				});
 			});
 
@@ -2605,6 +2629,18 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				button.setCta();
 				button.onClick(async () => {
 					await this.plugin.reorganizeExistingNotes();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Auto-reorganize notes after sync')
+			.setDesc('Automatically move existing Granola notes to their correct folders after each sync. Only works when Granola folders or date-based folders are enabled.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.enableAutoReorganize);
+				toggle.setDisabled(!this.plugin.settings.enableGranolaFolders && !this.plugin.settings.enableDateBasedFolders);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.enableAutoReorganize = value;
+					await this.plugin.saveSettings();
 				});
 			});
 
