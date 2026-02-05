@@ -825,12 +825,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 		} else {
-			// Default: search only in sync directory
+			// Default: search only in sync directory (including subfolders)
 			const folder = this.app.vault.getFolderByPath(this.settings.syncDirectory);
 			if (!folder) {
 				return null;
 			}
-			filesToSearch = folder.children.filter(file => file instanceof obsidian.TFile && file.extension === 'md');
+			// Use recursive search to find notes in subfolders (important for date-based or Granola folder organization)
+			filesToSearch = this.getAllMarkdownFilesInFolder(folder);
 		}
 		
 		for (const file of filesToSearch) {
