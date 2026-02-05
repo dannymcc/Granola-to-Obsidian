@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.1] - 2026-02-06
+### Fixed
+- **🔍 Duplicate Detection**: Fixed issue where notes in subfolders weren't found during duplicate detection
+  - When using date-based folders or Granola folder organization, notes are now correctly found
+  - Prevents duplicate notes being created when filename patterns are changed
+
+### Resolves
+- Fixes [#34](https://github.com/dannymcc/Granola-to-Obsidian/issues/34): Duplicated notes after selecting 2 different formats for sync
+
 ## [1.9.0] - 2026-02-05
 ### Added
 - **⚙️ Frontmatter Customization**: New settings to fully customize the frontmatter of synced notes
