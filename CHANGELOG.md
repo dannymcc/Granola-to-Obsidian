@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.0] - 2026-02-05
+### Added
+- **⚙️ Frontmatter Customization**: New settings to fully customize the frontmatter of synced notes
+  - **Include Title Toggle**: Option to exclude the `title` field from frontmatter — useful if you prefer the filename as the single source of truth
+  - **Include Dates Toggle**: Option to exclude `created_at` and `updated_at` timestamps from frontmatter
+  - **Date Format Selection**: Choose between ISO 8601 (full datetime), date-only (YYYY-MM-DD), or a custom format
+  - **Custom Date Format**: Define your own date format using YYYY, MM, DD, HH, mm, ss tokens
+  - **Additional Frontmatter**: Add custom key-value pairs to every synced note (e.g., `type: meeting`, `status: draft`)
+
+### Resolves
+- Fixes [#36](https://github.com/dannymcc/Granola-to-Obsidian/issues/36): Setting to adjust frontmatter (toggle individual fields)
+- Fixes [#35](https://github.com/dannymcc/Granola-to-Obsidian/issues/35): Configure properties in synced note
+- Fixes [#16](https://github.com/dannymcc/Granola-to-Obsidian/issues/16): Select date formats and property/ies to map to
+- Addresses [#14](https://github.com/dannymcc/Granola-to-Obsidian/issues/14): Assign a template to created meeting file (via additional frontmatter)
+
 ## [1.8.0] - 2025-12-22
 ### Added
 - **📝 My Notes Support**: New option to include your personal "My Notes" content from Granola under a dedicated "## My Notes" section
