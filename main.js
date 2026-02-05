@@ -47,6 +47,12 @@ const DEFAULT_SETTINGS = {
 	selectedGranolaFolders: [], // Array of Granola folder IDs to sync (empty = sync all)
 	enableFolderFilter: false, // Enable filtering by Granola folders
 	enableAutoReorganize: false, // Automatically reorganize notes after sync
+	// Frontmatter customization
+	includeTitle: true, // Include title field in frontmatter
+	includeDates: true, // Include created_at and updated_at in frontmatter
+	frontmatterDateFormat: 'iso', // 'iso', 'date-only', 'custom'
+	customDateFormat: 'YYYY-MM-DD', // Custom date format string
+	additionalFrontmatter: '', // Additional frontmatter lines (key: value, one per line)
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -1185,32 +1191,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				// Combine all tags
 				const allTags = [...attendeeTags, ...folderTags];
 
-				// Create frontmatter with original title
-				let frontmatter = '---\n';
-				frontmatter += 'granola_id: ' + docId + '\n';
-				const escapedTitle = title.replace(/"/g, '\\"');
-				frontmatter += 'title: "' + escapedTitle + '"\n';
-
-				if (granolaUrl) {
-					frontmatter += 'granola_url: "' + granolaUrl + '"\n';
-				}
-
-				if (doc.created_at) {
-					frontmatter += 'created_at: ' + doc.created_at + '\n';
-				}
-				if (doc.updated_at) {
-					frontmatter += 'updated_at: ' + doc.updated_at + '\n';
-				}
-
-				// Add all tags if any were found
-				if (allTags.length > 0) {
-					frontmatter += 'tags:\n';
-					for (const tag of allTags) {
-						frontmatter += '  - ' + tag + '\n';
-					}
-				}
-
-				frontmatter += '---\n\n';
+				// Build frontmatter using centralized helper
+				const frontmatter = this.buildFrontmatter(doc, title, allTags, granolaUrl);
 
 				// Build the note content with all sections
 				const noteContent = this.buildNoteContent(doc, transcript);
@@ -1239,31 +1221,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		// Combine all tags
 		const allTags = [...attendeeTags, ...folderTags];
 
-		let frontmatter = '---\n';
-		frontmatter += 'granola_id: ' + docId + '\n';
-		const escapedTitle = title.replace(/"/g, '\\"');
-		frontmatter += 'title: "' + escapedTitle + '"\n';
-
-		if (granolaUrl) {
-			frontmatter += 'granola_url: "' + granolaUrl + '"\n';
-		}
-
-		if (doc.created_at) {
-			frontmatter += 'created_at: ' + doc.created_at + '\n';
-		}
-		if (doc.updated_at) {
-			frontmatter += 'updated_at: ' + doc.updated_at + '\n';
-		}
-
-		// Add all tags if any were found
-		if (allTags.length > 0) {
-			frontmatter += 'tags:\n';
-			for (const tag of allTags) {
-				frontmatter += '  - ' + tag + '\n';
-			}
-		}
-
-		frontmatter += '---\n\n';
+		// Build frontmatter using centralized helper
+		const frontmatter = this.buildFrontmatter(doc, title, allTags, granolaUrl);
 
 		// Build the note content with all sections
 		const noteContent = this.buildNoteContent(doc, transcript);
@@ -1811,6 +1770,132 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
+	/**
+	 * Format a date string according to frontmatter date format settings
+	 * @param {string} dateString - ISO date string from Granola
+	 * @returns {string} - Formatted date string
+	 */
+	formatFrontmatterDate(dateString) {
+		if (!dateString) return '';
+		
+		try {
+			const date = new Date(dateString);
+			if (isNaN(date.getTime())) return dateString;
+			
+			switch (this.settings.frontmatterDateFormat) {
+				case 'date-only':
+					// Return just the date portion: YYYY-MM-DD
+					return date.toISOString().split('T')[0];
+				case 'custom':
+					// Apply custom format
+					return this.applyCustomDateFormat(date, this.settings.customDateFormat);
+				case 'iso':
+				default:
+					// Return full ISO string (original behaviour)
+					return dateString;
+			}
+		} catch (error) {
+			console.error('Error formatting date:', error);
+			return dateString;
+		}
+	}
+
+	/**
+	 * Apply a custom date format string to a date
+	 * Supports: YYYY, MM, DD, HH, mm, ss
+	 * @param {Date} date - Date object
+	 * @param {string} format - Format string
+	 * @returns {string} - Formatted date string
+	 */
+	applyCustomDateFormat(date, format) {
+		const pad = (n) => n.toString().padStart(2, '0');
+		return format
+			.replace('YYYY', date.getFullYear())
+			.replace('MM', pad(date.getMonth() + 1))
+			.replace('DD', pad(date.getDate()))
+			.replace('HH', pad(date.getHours()))
+			.replace('mm', pad(date.getMinutes()))
+			.replace('ss', pad(date.getSeconds()));
+	}
+
+	/**
+	 * Parse additional frontmatter from settings
+	 * @returns {string} - Additional frontmatter lines
+	 */
+	parseAdditionalFrontmatter() {
+		if (!this.settings.additionalFrontmatter || !this.settings.additionalFrontmatter.trim()) {
+			return '';
+		}
+		
+		try {
+			// Split by newlines, filter empty lines, ensure each line ends with newline
+			const lines = this.settings.additionalFrontmatter
+				.split('\n')
+				.map(line => line.trim())
+				.filter(line => line.length > 0 && line.includes(':'));
+			
+			if (lines.length === 0) return '';
+			return lines.join('\n') + '\n';
+		} catch (error) {
+			console.error('Error parsing additional frontmatter:', error);
+			return '';
+		}
+	}
+
+	/**
+	 * Build frontmatter string for a document
+	 * @param {object} doc - Granola document
+	 * @param {string} title - Note title
+	 * @param {array} allTags - Combined tags array
+	 * @param {string} granolaUrl - Granola URL (or null)
+	 * @returns {string} - Complete frontmatter string with delimiters
+	 */
+	buildFrontmatter(doc, title, allTags, granolaUrl) {
+		const docId = doc.id;
+		let frontmatter = '---\n';
+		
+		// granola_id is always included (required for duplicate detection)
+		frontmatter += 'granola_id: ' + docId + '\n';
+		
+		// Title (optional based on settings)
+		if (this.settings.includeTitle) {
+			const escapedTitle = title.replace(/"/g, '\\"');
+			frontmatter += 'title: "' + escapedTitle + '"\n';
+		}
+		
+		// Granola URL (optional based on existing setting)
+		if (granolaUrl) {
+			frontmatter += 'granola_url: "' + granolaUrl + '"\n';
+		}
+		
+		// Dates (optional based on settings)
+		if (this.settings.includeDates) {
+			if (doc.created_at) {
+				frontmatter += 'created_at: ' + this.formatFrontmatterDate(doc.created_at) + '\n';
+			}
+			if (doc.updated_at) {
+				frontmatter += 'updated_at: ' + this.formatFrontmatterDate(doc.updated_at) + '\n';
+			}
+		}
+		
+		// Tags
+		if (allTags.length > 0) {
+			frontmatter += 'tags:\n';
+			for (const tag of allTags) {
+				frontmatter += '  - ' + tag + '\n';
+			}
+		}
+		
+		// Additional custom frontmatter
+		const additionalFm = this.parseAdditionalFrontmatter();
+		if (additionalFm) {
+			frontmatter += additionalFm;
+		}
+		
+		frontmatter += '---\n\n';
+		return frontmatter;
+	}
+
 	async updateExistingNoteMetadata(file, doc) {
 		try {
 			// Extract all metadata
@@ -2291,6 +2376,75 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 
 		// Create a heading for metadata settings
 		containerEl.createEl('h3', {text: 'Note metadata & tags'});
+
+		// Frontmatter customization settings
+		new obsidian.Setting(containerEl)
+			.setName('Include title in frontmatter')
+			.setDesc('Add the meeting title as a "title" field in frontmatter. Disable if you want to use the filename as the single source of truth.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.includeTitle);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.includeTitle = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Include dates in frontmatter')
+			.setDesc('Add created_at and updated_at fields to frontmatter')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.includeDates);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.includeDates = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Frontmatter date format')
+			.setDesc('Choose how dates are formatted in frontmatter')
+			.addDropdown(dropdown => {
+				dropdown
+					.addOption('iso', 'ISO 8601 (2026-02-05T22:30:00.000Z)')
+					.addOption('date-only', 'Date only (2026-02-05)')
+					.addOption('custom', 'Custom format')
+					.setValue(this.plugin.settings.frontmatterDateFormat)
+					.onChange(async (value) => {
+						this.plugin.settings.frontmatterDateFormat = value;
+						await this.plugin.saveSettings();
+						// Re-render to show/hide custom format field
+						this.display();
+					});
+			});
+
+		// Show custom date format field only when 'custom' is selected
+		if (this.plugin.settings.frontmatterDateFormat === 'custom') {
+			new obsidian.Setting(containerEl)
+				.setName('Custom date format')
+				.setDesc('Use YYYY for year, MM for month, DD for day, HH for hour, mm for minute, ss for second. Example: YYYY-MM-DD')
+				.addText(text => {
+					text.setPlaceholder('YYYY-MM-DD');
+					text.setValue(this.plugin.settings.customDateFormat);
+					text.onChange(async (value) => {
+						this.plugin.settings.customDateFormat = value;
+						await this.plugin.saveSettings();
+					});
+				});
+		}
+
+		new obsidian.Setting(containerEl)
+			.setName('Additional frontmatter')
+			.setDesc('Add custom fields to frontmatter. One per line in "key: value" format. Example: "type: meeting" or "status: draft"')
+			.addTextArea(textArea => {
+				textArea.setPlaceholder('type: meeting\nstatus: draft');
+				textArea.setValue(this.plugin.settings.additionalFrontmatter);
+				textArea.inputEl.rows = 4;
+				textArea.inputEl.cols = 30;
+				textArea.onChange(async (value) => {
+					this.plugin.settings.additionalFrontmatter = value;
+					await this.plugin.saveSettings();
+				});
+			});
 
 		new obsidian.Setting(containerEl)
 			.setName('Include attendee tags')
