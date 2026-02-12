@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.2] - 2026-02-12
+### Fixed
+- **🔧 Obsidian API Compatibility**: Replaced removed `vault.recurseChildren()` API call with `getMarkdownFiles().filter()`, fixing a crash that prevented all sync operations (Fixes [#42](https://github.com/dannymcc/Granola-to-Obsidian/issues/42))
+- **📝 My Notes Extraction**: Added fallback to check `doc.content` directly when "My Notes" panel is not found in the panels array, fixing "Include My Notes" not producing any content (Fixes [#33](https://github.com/dannymcc/Granola-to-Obsidian/issues/33))
+- **🔄 Smart Re-sync for Updated Notes**: Notes that have been updated in Granola (e.g., re-enhanced with a new template) are now automatically re-synced even when "Skip Existing Notes" is enabled, by comparing `updated_at` timestamps (Fixes [#21](https://github.com/dannymcc/Granola-to-Obsidian/issues/21))
+
 ## [1.9.1] - 2026-02-06
 ### Fixed
 - **🔍 Duplicate Detection**: Fixed issue where notes in subfolders weren't found during duplicate detection

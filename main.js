@@ -856,21 +856,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	getAllMarkdownFilesInFolder(folder) {
-		const files = [];
-		
-		// Safety check - ensure folder exists
 		if (!folder) {
-			return files;
+			return [];
 		}
-		
-		// Use Vault.recurseChildren to get all markdown files in folder and subfolders
-		this.app.vault.recurseChildren(folder, (file) => {
-			if (file instanceof obsidian.TFile && file.extension === 'md') {
-				files.push(file);
-			}
-		});
-		
-		return files;
+		const folderPath = folder.path;
+		return this.app.vault.getMarkdownFiles().filter(
+			(file) => file.path.startsWith(folderPath + '/')
+		);
 	}
 
 	/**
@@ -1087,6 +1079,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return doc.last_viewed_panel.content;
 		}
 
+		// Fallback: for my_notes, check doc.content directly (user's own notes)
+		if (panelType === 'my_notes' && doc.content && doc.content.type === 'doc') {
+			return doc.content;
+		}
+
 		return null;
 	}
 
@@ -1161,19 +1158,23 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const existingFile = await this.findExistingNoteByGranolaId(docId);
 
 		if (existingFile) {
-			if (this.settings.skipExistingNotes && !this.settings.includeAttendeeTags && !this.settings.includeGranolaUrl) {
-				return true; // Return true so it counts as "synced" but we don't update
-			}
+			if (this.settings.skipExistingNotes) {
+				// Check if the Granola document has been updated since the note was last synced
+				const outdated = await this.isNoteOutdated(existingFile, doc);
 
-			if (this.settings.skipExistingNotes && (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl)) {
-				// Only update metadata (tags, URLs), preserve existing content
-				try {
-					await this.updateExistingNoteMetadata(existingFile, doc);
+				if (!outdated) {
+					// Note is up to date - only update metadata if needed
+					if (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl) {
+						try {
+							await this.updateExistingNoteMetadata(existingFile, doc);
+						} catch (error) {
+							console.error('Error updating metadata for existing note:', error);
+						}
+					}
 					return true;
-				} catch (error) {
-					console.error('Error updating metadata for existing note:', error);
-					return false;
 				}
+				// Note is outdated - fall through to full update
+				console.log('Note "' + title + '" has been updated in Granola, re-syncing...');
 			}
 
 			// Update existing note (full update)
@@ -1895,6 +1896,27 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		
 		frontmatter += '---\n\n';
 		return frontmatter;
+	}
+
+	async isNoteOutdated(existingFile, doc) {
+		if (!doc.updated_at) return false;
+		try {
+			const content = await this.app.vault.read(existingFile);
+			const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+			if (frontmatterMatch) {
+				const updatedAtMatch = frontmatterMatch[1].match(/updated_at:\s*(.+)$/m);
+				if (updatedAtMatch) {
+					const existingDate = new Date(updatedAtMatch[1].trim());
+					const granolaDate = new Date(doc.updated_at);
+					return granolaDate > existingDate;
+				}
+			}
+			// No updated_at in frontmatter - treat as outdated so it gets updated
+			return true;
+		} catch (error) {
+			console.error('Error checking if note is outdated:', error);
+			return false;
+		}
 	}
 
 	async updateExistingNoteMetadata(file, doc) {
