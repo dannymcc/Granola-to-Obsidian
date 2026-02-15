@@ -1,11 +1,11 @@
 {
-	"id": "granola-sync",
-	"name": "Granola to Obsidian Sync",
-	"version": "1.9.2",
+	"id": "granola-sync-plus",
+	"name": "Granola Sync Plus",
+	"version": "1.9.3",
 	"minAppVersion": "1.6.6",
-	"description": "Sync your Granola AI notes to your vault with customizable settings.",
+	"description": "Sync your Granola AI meeting notes to your vault with customizable settings.",
 	"author": "Danny McClelland",
 	"authorUrl": "https://github.com/dannymcc/",
-	"fundingUrl": "",
+	"fundingUrl": "https://buymeacoffee.com/d3hkz6gwle",
 	"isDesktopOnly": true
 }

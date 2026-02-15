@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.3] - 2026-02-15
+### Changed
+- **Plugin ID renamed**: Changed plugin ID from `granola-sync` to `granola-sync-plus` for community plugin catalog submission (existing ID was already taken)
+- **Plugin name**: Renamed to "Granola Sync Plus" for catalog listing
+- **Funding URL**: Added Buy Me a Coffee link to manifest
+
 ## [1.9.2] - 2026-02-12
 ### Fixed
 - **🔧 Obsidian API Compatibility**: Replaced removed `vault.recurseChildren()` API call with `getMarkdownFiles().filter()`, fixing a crash that prevented all sync operations (Fixes [#42](https://github.com/dannymcc/Granola-to-Obsidian/issues/42))

@@ -1,4 +1,4 @@
-# Granola Sync for Obsidian
+# Granola Sync Plus for Obsidian
 
 [!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/d3hkz6gwle)
 
@@ -37,7 +37,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 ### Manual Installation
 
 1. Download the latest release from the [Releases page](https://github.com/dannymcc/Granola-to-Obsidian/releases)
-2. Extract the files to your vault's plugins directory: `.obsidian/plugins/granola-sync/`
+2. Extract the files to your vault's plugins directory: `.obsidian/plugins/granola-sync-plus/`
 3. Enable the plugin in Obsidian Settings → Community Plugins
 4. Configure your sync settings
 
@@ -49,7 +49,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 
 ## ⚙️ Configuration
 
-Access plugin settings via **Settings → Community Plugins → Granola Sync**
+Access plugin settings via **Settings → Community Plugins → Granola Sync Plus**
 
 ### Sync Directory
 Choose which folder in your vault to sync notes to (default: `Granola`)
@@ -370,7 +370,7 @@ Your converted meeting content appears here in clean Markdown format.
 
 ## 🔧 Requirements
 
-- Obsidian v0.15.0+
+- Obsidian v1.6.6+
 - Active Granola AI account
 - Granola desktop app installed and authenticated (available for macOS and Windows)
 

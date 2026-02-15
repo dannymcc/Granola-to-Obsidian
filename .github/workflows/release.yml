@@ -95,16 +95,16 @@ jobs:
       - name: Create plugin zip
         run: |
           # Create folder with plugin name
-          mkdir granola-sync
+          mkdir granola-sync-plus
           
           # Copy plugin files to folder
-          cp main.js granola-sync/
-          cp manifest.json granola-sync/
-          cp styles.css granola-sync/
-          cp versions.json granola-sync/
+          cp main.js granola-sync-plus/
+          cp manifest.json granola-sync-plus/
+          cp styles.css granola-sync-plus/
+          cp versions.json granola-sync-plus/
           
           # Create zip file with just version number
-          zip -r ${{ steps.version.outputs.VERSION }}.zip granola-sync/
+          zip -r ${{ steps.version.outputs.VERSION }}.zip granola-sync-plus/
           
           # Verify zip was created
           ls -la *.zip
@@ -154,8 +154,8 @@ jobs:
           CHANGELOG_CONTENT=$(cat RELEASE_CHANGELOG.txt)
           
           gh release create ${{ steps.version.outputs.VERSION }} \
-            --title "Granola Sync ${{ steps.version.outputs.VERSION }}" \
-            --notes "## 🚀 Granola Sync ${{ steps.version.outputs.VERSION }}
+            --title "Granola Sync Plus ${{ steps.version.outputs.VERSION }}" \
+            --notes "## 🚀 Granola Sync Plus ${{ steps.version.outputs.VERSION }}
             
             $CHANGELOG_CONTENT
             
@@ -165,12 +165,12 @@ jobs:
             
             **Option 1: Download ZIP (Recommended)**
             1. Download \`${{ steps.version.outputs.VERSION }}.zip\`
-            2. Extract the \`granola-sync\` folder to \`.obsidian/plugins/\` in your vault
+            2. Extract the \`granola-sync-plus\` folder to \`.obsidian/plugins/\` in your vault
             3. Enable the plugin in Obsidian Settings → Community Plugins
             
             **Option 2: Manual Installation**  
             1. Download individual files: \`main.js\`, \`manifest.json\`, \`styles.css\`, \`versions.json\`
-            2. Create folder \`.obsidian/plugins/granola-sync/\` in your vault
+            2. Create folder \`.obsidian/plugins/granola-sync-plus/\` in your vault
             3. Place all files in the folder
             4. Enable the plugin in Obsidian Settings → Community Plugins" \
             main.js manifest.json styles.css versions.json ${{ steps.version.outputs.VERSION }}.zip
