@@ -9,6 +9,8 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 
 ![Granola Sync](https://i.imgur.com/EmFRYTO.png)
 
+> **Note:** This plugin was recently renamed from "Granola Sync" to "Granola Sync Plus" and the plugin ID changed from `granola-sync` to `granola-sync-plus` as part of our submission to the [Obsidian Community Plugin catalog](https://github.com/obsidianmd/obsidian-releases/pull/10254). If you previously installed the plugin manually, you'll need to rename your `.obsidian/plugins/granola-sync/` folder to `.obsidian/plugins/granola-sync-plus/` and restart Obsidian.
+
 ## 🚀 Features
 
 - **🔄 Automatic Sync**: Configurable auto-sync from every minute to daily, or manual-only
