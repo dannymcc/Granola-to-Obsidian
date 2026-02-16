@@ -311,8 +311,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 
 			let syncedCount = 0;
-			const todaysNotes = [];
-			const today = new Date().toDateString();
+			const notesByDate = {};
 
 			for (let i = 0; i < documentsToSync.length; i++) {
 				const doc = documentsToSync[i];
@@ -327,27 +326,29 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					if (success) {
 						syncedCount++;
 					}
-					
-					// Check for note integration regardless of sync success
-					// This ensures existing notes from today are still included
+
+					// Group notes by their creation date for daily/periodic note integration
 					if ((this.settings.enableDailyNoteIntegration || this.settings.enablePeriodicNoteIntegration) && doc.created_at) {
-						const noteDate = new Date(doc.created_at).toDateString();
-						if (noteDate === today) {
-							// Find the actual file that was created or already exists
-							const actualFile = await this.findExistingNoteByGranolaId(doc.id);
-							
-							if (actualFile) {
-								const noteData = {};
-								noteData.title = doc.title || 'Untitled Granola Note';
-								noteData.actualFilePath = actualFile.path; // Use actual file path
-								
-								const createdDate = new Date(doc.created_at);
-								const hours = String(createdDate.getHours()).padStart(2, '0');
-								const minutes = String(createdDate.getMinutes()).padStart(2, '0');
-								noteData.time = hours + ':' + minutes;
-								
-								todaysNotes.push(noteData);
+						const createdDate = new Date(doc.created_at);
+						const dateKey = createdDate.toDateString();
+
+						// Find the actual file that was created or already exists
+						const actualFile = await this.findExistingNoteByGranolaId(doc.id);
+
+						if (actualFile) {
+							const noteData = {};
+							noteData.title = doc.title || 'Untitled Granola Note';
+							noteData.actualFilePath = actualFile.path;
+							noteData.date = createdDate;
+
+							const hours = String(createdDate.getHours()).padStart(2, '0');
+							const minutes = String(createdDate.getMinutes()).padStart(2, '0');
+							noteData.time = hours + ':' + minutes;
+
+							if (!notesByDate[dateKey]) {
+								notesByDate[dateKey] = [];
 							}
+							notesByDate[dateKey].push(noteData);
 						}
 					}
 				} catch (error) {
@@ -355,15 +356,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 
-			// Create a deep copy to prevent any reference issues
-			const todaysNotesCopy = todaysNotes.map(note => ({...note}));
-			
-			if (this.settings.enableDailyNoteIntegration && todaysNotes.length > 0) {
-				await this.updateDailyNote(todaysNotesCopy);
-			}
+			// Update daily/periodic notes for each date that has meetings
+			for (const [dateKey, notes] of Object.entries(notesByDate)) {
+				const notesCopy = notes.map(note => ({...note}));
+				const noteDate = notes[0].date;
 
-			if (this.settings.enablePeriodicNoteIntegration && todaysNotes.length > 0) {
-				await this.updatePeriodicNote(todaysNotesCopy);
+				if (this.settings.enableDailyNoteIntegration) {
+					await this.updateDailyNote(notesCopy, noteDate);
+				}
+
+				if (this.settings.enablePeriodicNoteIntegration) {
+					await this.updatePeriodicNote(notesCopy, noteDate);
+				}
 			}
 
 			this.updateStatusBar('Complete', syncedCount);
@@ -1302,17 +1306,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async updateDailyNote(todaysNotes) {
+	async updateDailyNote(notes, date) {
 		try {
-			const dailyNote = await this.getDailyNote();
+			const dailyNote = await this.getDailyNote(date);
 			if (!dailyNote) {
 				return;
 			}
 
 			let content = await this.app.vault.read(dailyNote);
 			const sectionHeader = this.settings.dailyNoteSectionName;
-			
-			const notesList = todaysNotes
+
+			const notesList = notes
 				.sort((a, b) => a.time.localeCompare(b.time))
 				.map(note => '- ' + note.time + ' [[' + note.actualFilePath + '|' + note.title + ']]')
 				.join('\n');
@@ -1357,17 +1361,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async updatePeriodicNote(todaysNotes) {
+	async updatePeriodicNote(notes, date) {
 		try {
-			const periodicNote = await this.getPeriodicNote();
+			const periodicNote = await this.getPeriodicNote(date);
 			if (!periodicNote) {
 				return;
 			}
 
 			let content = await this.app.vault.read(periodicNote);
 			const sectionHeader = this.settings.periodicNoteSectionName;
-			
-			const notesList = todaysNotes
+
+			const notesList = notes
 				.sort((a, b) => a.time.localeCompare(b.time))
 				.map(note => '- ' + note.time + ' [[' + note.actualFilePath + '|' + note.title + ']]')
 				.join('\n');
@@ -1412,9 +1416,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async getDailyNote() {
+	async getDailyNote(date) {
 		try {
-			const today = new Date();
+			const targetDate = date || new Date();
 
 			// Try to get Daily Notes plugin settings from Obsidian
 			const dailyNotesPlugin = this.app.internalPlugins.getPluginById('daily-notes');
@@ -1423,13 +1427,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const dateFormat = dailyNotesSettings.format || 'YYYY-MM-DD';
 				const folder = dailyNotesSettings.folder || '';
 
-				// Format today's date using the configured format
-				const todayFormatted = this.formatDateWithPattern(today, dateFormat);
+				const formatted = this.formatDateWithPattern(targetDate, dateFormat);
 
 				// Build the expected path
 				const expectedPath = folder
-					? `${folder}/${todayFormatted}.md`
-					: `${todayFormatted}.md`;
+					? `${folder}/${formatted}.md`
+					: `${formatted}.md`;
 
 				// Try to get the file directly by path
 				const dailyNote = this.app.vault.getAbstractFileByPath(expectedPath);
@@ -1439,16 +1442,16 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 				// Fallback: search for file by exact basename match
 				const files = this.app.vault.getMarkdownFiles();
-				const matchedFile = files.find(f => f.basename === todayFormatted);
+				const matchedFile = files.find(f => f.basename === formatted);
 				if (matchedFile) {
 					return matchedFile;
 				}
 			}
 
 			// Fallback for when Daily Notes plugin is disabled: use legacy fuzzy matching
-			const year = today.getFullYear();
-			const month = String(today.getMonth() + 1).padStart(2, '0');
-			const day = String(today.getDate()).padStart(2, '0');
+			const year = targetDate.getFullYear();
+			const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+			const day = String(targetDate.getDate()).padStart(2, '0');
 
 			const searchFormats = [
 				`${day}-${month}-${year}`, // DD-MM-YYYY
@@ -1507,7 +1510,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return this.app.plugins.enabledPlugins.has('periodic-notes');
 	}
 
-	async getPeriodicNote() {
+	async getPeriodicNote(date) {
 		try {
 			if (!this.isPeriodicNotesPluginAvailable()) {
 				return null;
@@ -1515,43 +1518,31 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 			// Since the Periodic Notes API is not accessible, let's try a different approach
 			// Let's try to find the daily note directly by looking for it in the vault
-			
-			// Get today's date
-			const today = new Date();
-			const todayFormatted = today.toISOString().split('T')[0]; // YYYY-MM-DD format
-			
-			// Search for today's daily note in the vault
+
+			const targetDate = date || new Date();
+			const formatted = targetDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+
 			const files = this.app.vault.getMarkdownFiles();
-			
-			// Look for files that might be today's daily note
-			// Priority order: exact date match, then files in Daily Notes folder, then any file with today's date
+
+			// Priority order: exact date match, then files in Daily Notes folder, then any file with the date
 			const possibleDailyNotes = files.filter(file => {
-				// First priority: exact date match in filename
-				if (file.name === todayFormatted + '.md' || file.name === todayFormatted) {
+				if (file.name === formatted + '.md' || file.name === formatted) {
 					return true;
 				}
-				// Second priority: files in Daily Notes folder with today's date
-				if (file.path.includes('Daily') && (file.name.includes(todayFormatted) || file.path.includes(todayFormatted))) {
+				if (file.path.includes('Daily') && (file.name.includes(formatted) || file.path.includes(formatted))) {
 					return true;
 				}
-				// Third priority: any file with today's date
-				return file.name.includes(todayFormatted) || 
-					   file.path.includes(todayFormatted) ||
-					   file.name.includes(today.toDateString().split(' ')[2]) || // Day of month
-					   file.name.includes(today.getDate().toString());
+				return file.name.includes(formatted) ||
+					   file.path.includes(formatted) ||
+					   file.name.includes(targetDate.toDateString().split(' ')[2]) ||
+					   file.name.includes(targetDate.getDate().toString());
 			});
-			
-			// Sort by priority: exact date match first, then Daily Notes folder, then others
+
 			possibleDailyNotes.sort((a, b) => {
-				// Exact date match gets highest priority
-				if (a.name === todayFormatted + '.md' || a.name === todayFormatted) return -1;
-				if (b.name === todayFormatted + '.md' || b.name === todayFormatted) return 1;
-				
-				// Daily Notes folder gets second priority
+				if (a.name === formatted + '.md' || a.name === formatted) return -1;
+				if (b.name === formatted + '.md' || b.name === formatted) return 1;
 				if (a.path.includes('Daily') && !b.path.includes('Daily')) return -1;
 				if (b.path.includes('Daily') && !a.path.includes('Daily')) return 1;
-				
-				// Otherwise maintain original order
 				return 0;
 			});
 			
