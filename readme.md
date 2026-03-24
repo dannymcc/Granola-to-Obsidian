@@ -23,6 +23,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **🗓️ Daily Note Integration**: Automatically add today's meetings to your Daily Note with times and links
 - **📅 Periodic Notes Support**: Full integration with the Periodic Notes plugin for flexible daily note management
 - **🏷️ Attendee Tagging**: Automatically extract meeting attendees and add them as organized tags (e.g., `person/john-smith`)
+- **🔗 Attendee Backlinks**: Optionally write attendees as Obsidian wikilinks (e.g., `[[Eddie Brock]]`) in a configurable frontmatter property
 - **🔗 Granola URL Links**: Add direct links back to original Granola notes in frontmatter for easy access
 - **🔧 Smart Filtering**: Exclude your own name from attendee tags with configurable settings
 - **🛡️ Preserve Manual Additions**: Option to skip updating existing notes, preserving your tags, summaries, and custom properties
@@ -122,6 +123,36 @@ Automatically extract meeting attendees from Granola and add them as organized t
 - **Clean organization**: All attendee tags grouped under `person/` prefix
 - **Smart filtering**: Your name is automatically excluded from tags
 - **Retroactive updates**: Can update existing notes with attendee tags while preserving content
+
+### Attendee Backlinks
+
+Optionally write meeting attendees as Obsidian wikilinks in a separate frontmatter property. This is additive — existing attendee tags are always preserved unchanged.
+
+#### Settings:
+- **Include Attendee Backlinks**: Enable/disable wikilink generation (disabled by default)
+- **Attendee Backlink Property**: The frontmatter property name to use (default: `participants`)
+
+#### How it works:
+When enabled, each synced note gains a new frontmatter property containing `[[Name]]` wikilinks for every attendee (using the same "exclude my name" filter as tags):
+
+```yaml
+---
+tags:
+  - person/eddie-brock
+  - person/gwen-stacy
+participants:
+  - "[[Eddie Brock]]"
+  - "[[Gwen Stacy]]"
+---
+```
+
+The attendee display name is used exactly as it appears in Granola — no normalization or aliasing is applied.
+
+#### Benefits:
+- **Graph view connections**: Attendees appear as linked nodes in Obsidian's graph view
+- **Backlink panel**: Navigate directly to people pages from each meeting note
+- **Additive**: Tags are never removed or altered; backlinks sit alongside them
+- **Configurable property**: Rename the property to fit your vault's schema (e.g., `people`, `attendees`)
 
 ### Granola URL Integration
 
