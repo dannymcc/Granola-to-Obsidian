@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.4] - 2026-05-11
+### Fixed
+- **🔐 Auth after Granola's encrypted-storage migration**: Granola's late-April / early-May 2026 desktop builds replaced the plaintext `supabase.json` with an encrypted `supabase.json.enc` and moved auth tokens into a new plaintext `stored-accounts.json` file. The plugin now reads tokens from `stored-accounts.json` (macOS, Windows and Linux paths) and parses the new multi-account `accounts[].tokens.access_token` shape. Existing `supabase.json` / `workos_tokens` / `cognito_tokens` paths still work as higher-priority fallbacks for users on older Granola builds (Fixes [#55](https://github.com/dannymcc/Granola-to-Obsidian/issues/55))
+
+### Credits
+- Thanks to [@brettjenkins](https://github.com/brettjenkins) for diagnosing the upstream change and implementing the fix in [#54](https://github.com/dannymcc/Granola-to-Obsidian/pull/54)
+
 ## [1.9.3] - 2026-02-15
 ### Changed
 - **Plugin ID renamed**: Changed plugin ID from `granola-sync` to `granola-sync-plus` for community plugin catalog submission (existing ID was already taken)
