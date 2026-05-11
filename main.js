@@ -392,7 +392,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			// Current configured path
 			path.resolve(homedir, this.settings.authKeyPath),
 			// Fallback to old default location
-			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json')
+			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json'),
+			// May 2026: Granola migrated to encrypted on-disk storage; tokens now live in stored-accounts.json
+			...(obsidian.Platform.isWin
+				? [path.resolve(homedir, 'AppData/Roaming/Granola/stored-accounts.json')]
+				: obsidian.Platform.isLinux
+					? [path.resolve(homedir, '.config/Granola/stored-accounts.json')]
+					: [path.resolve(homedir, 'Library/Application Support/Granola/stored-accounts.json')])
 		];
 
 		for (const authPath of authPaths) {
@@ -427,7 +433,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						accessToken = data.cognito_tokens.access_token;
 					}
 				}
-				
+
+				// May 2026 multi-account format (stored-accounts.json):
+				// { accounts: "[{ tokens: \"{access_token,refresh_token,...}\", userInfo, ... }]" }
+				if (!accessToken && data.accounts) {
+					try {
+						const accounts = typeof data.accounts === 'string' ? JSON.parse(data.accounts) : data.accounts;
+						if (Array.isArray(accounts) && accounts.length > 0 && accounts[0].tokens) {
+							const tokens = typeof accounts[0].tokens === 'string' ? JSON.parse(accounts[0].tokens) : accounts[0].tokens;
+							accessToken = tokens && tokens.access_token;
+						}
+					} catch (e) {
+						console.error('Error parsing stored-accounts.json accounts:', e);
+					}
+				}
+
 				if (accessToken) {
 					console.log('Successfully loaded credentials from:', authPath);
 					return accessToken;
