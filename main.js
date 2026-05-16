@@ -283,9 +283,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				if (folders) {
 					// Create a mapping of document ID to folder for quick lookup
 					this.documentToFolderMap = {};
+					// Create a mapping of folder ID to folder for parent traversal
+					this.folderIdMap = {};
 					// Also store all available folders for the settings UI
 					this.availableGranolaFolders = folders;
 					for (const folder of folders) {
+						this.folderIdMap[folder.id] = folder;
 						if (folder.document_ids) {
 							for (const docId of folder.document_ids) {
 								this.documentToFolderMap[docId] = folder;
@@ -784,13 +787,24 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return this.settings.syncDirectory;
 		}
 
-		// Clean folder name for filesystem use
-		const cleanFolderName = folder.title
+		// Build the full folder path by traversing parent_document_list_id chain
+		const cleanName = (title) => title
 			.replace(/[<>:"/\\|?*]/g, '') // Remove invalid filesystem characters
 			.replace(/\s+/g, this.settings.filenameSeparator) // Replace spaces with configured separator
 			.trim();
 
-		return path.join(this.settings.syncDirectory, cleanFolderName);
+		const segments = [];
+		let current = folder;
+		const visited = new Set();
+		while (current) {
+			if (visited.has(current.id)) break; // guard against cycles
+			visited.add(current.id);
+			segments.unshift(cleanName(current.title));
+			const parentId = current.parent_document_list_id;
+			current = (parentId && this.folderIdMap) ? this.folderIdMap[parentId] : null;
+		}
+
+		return path.join(this.settings.syncDirectory, ...segments);
 	}
 
 	async ensureDateBasedDirectoryExists(datePath) {
@@ -2017,7 +2031,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					if (folders) {
 						// Create a mapping of document ID to folder for quick lookup
 						this.documentToFolderMap = {};
+						// Create a mapping of folder ID to folder for parent traversal
+						this.folderIdMap = {};
 						for (const folder of folders) {
+							this.folderIdMap[folder.id] = folder;
 							if (folder.document_ids) {
 								for (const docId of folder.document_ids) {
 									this.documentToFolderMap[docId] = folder;
