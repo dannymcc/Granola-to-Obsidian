@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.0] - 2026-05-16
+
+### Fixed
+- **🔐 Credential loader prefers `stored-accounts.json`**: When a stale `supabase.json` was left behind by older Granola versions, the plugin was reading it first and short-circuiting with an expired token, never falling through to the new `stored-accounts.json` written by Granola 7.205+. The lookup order now tries `stored-accounts.json` first and skips paths that resolve to a directory (Fixes [#56](https://github.com/dannymcc/Granola-to-Obsidian/issues/56))
+- **🛡️ "Skip existing notes" now actually skips**: Previously, if Granola had updated the source document, the plugin would fall through and overwrite the local file even with this setting enabled — silently destroying manual edits. The setting now truly protects existing notes; only additive frontmatter (attendee tags, attendee backlinks, Granola URL) is refreshed (Fixes [#48](https://github.com/dannymcc/Granola-to-Obsidian/issues/48)). **Behaviour change** for users who relied on `1.9.2`'s "Smart re-sync for updated notes"; if you want re-sync on Granola updates, disable "Skip existing notes".
+- **📝 Notes without titles in Granola are no longer synced**: Granola creates the document as soon as a meeting starts, and users often add a title later. The plugin used to write these as `Untitled Granola Note.md` and never rename them. We now skip untitled documents and pick them up on the next sync once they have a title (Fixes [#53](https://github.com/dannymcc/Granola-to-Obsidian/issues/53))
+- **📅 Daily-note links use the meeting's date, not the sync date**: A meeting that syncs the day after it took place now links into the correct day's daily/periodic note instead of being added to today's. Thanks to [@georgeguimaraes](https://github.com/georgeguimaraes) in [#44](https://github.com/dannymcc/Granola-to-Obsidian/pull/44)
+- **📁 Nested Granola folders sync to nested vault folders**: Walks the `parent_document_list_id` chain so a sub-space syncs to `<syncDir>/Parent/Child/` instead of being flattened at the root. Thanks to [@michaeljauk](https://github.com/michaeljauk) in [#49](https://github.com/dannymcc/Granola-to-Obsidian/pull/49)
+
+### Added
+- **🔗 Optional attendee backlinks in frontmatter**: New toggle writes attendees as Obsidian `[[wikilinks]]` in a configurable frontmatter property (default `participants`), so attendees appear in the graph view and backlink panel. Off by default; existing attendee-tag behaviour is unchanged. Thanks to [@phenly](https://github.com/phenly) in [#51](https://github.com/dannymcc/Granola-to-Obsidian/pull/51)
+- **⏱️ Toggle for per-speaker transcript timestamps**: New "Include transcript timestamps" setting hides the `(HH:MM:SS)` markers in transcripts for leaner notes / cleaner LLM input. On by default. Thanks to [@jsbirch](https://github.com/jsbirch) in [#50](https://github.com/dannymcc/Granola-to-Obsidian/pull/50)
+- **🔒 README "Network use & background activity" section**: Explicit disclosure of the `setInterval` + network behaviour used by auto-sync, in line with the Obsidian community-plugin reviewer recommendation.
+
+### Changed
+- **📦 Release assets trimmed to plugin essentials**: Releases now contain only `main.js`, `manifest.json`, and `styles.css`, matching the Obsidian reviewer recommendation. The release-bundled `.zip` and `versions.json` were removed (Obsidian reads `versions.json` from the repo, not from releases).
+- **🔏 Release artifacts are signed with GitHub artifact attestations**: `main.js` and `styles.css` now have build provenance attestations; verify with `gh attestation verify main.js --repo dannymcc/Granola-to-Obsidian`.
+
 ## [1.9.4] - 2026-05-11
 ### Fixed
 - **🔐 Auth after Granola's encrypted-storage migration**: Granola's late-April / early-May 2026 desktop builds replaced the plaintext `supabase.json` with an encrypted `supabase.json.enc` and moved auth tokens into a new plaintext `stored-accounts.json` file. The plugin now reads tokens from `stored-accounts.json` (macOS, Windows and Linux paths) and parses the new multi-account `accounts[].tokens.access_token` shape. Existing `supabase.json` / `workos_tokens` / `cognito_tokens` paths still work as higher-priority fallbacks for users on older Granola builds (Fixes [#55](https://github.com/dannymcc/Granola-to-Obsidian/issues/55))
