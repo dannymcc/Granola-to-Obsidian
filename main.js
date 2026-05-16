@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS = {
 	syncAllHistoricalNotes: false, // Sync all historical notes from Granola, not just recent ones
 	documentSyncLimit: 100, // Maximum number of documents to sync (used when syncAllHistoricalNotes is false)
 	includeFullTranscript: false, // Include full meeting transcript in notes
+	includeTranscriptTimestamps: true, // Include timestamps next to each speaker in transcript
 	includeMyNotes: true, // Include "My Notes" section from Granola
 	includeEnhancedNotes: true, // Include "Enhanced Notes" (AI summary) from Granola
 	selectedGranolaFolders: [], // Array of Granola folder IDs to sync (empty = sync all)
@@ -230,9 +231,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const flushCurrentSegment = () => {
 			const cleanText = currentText.trim().replace(/\s+/g, " ");
 			if (cleanText && currentSpeaker) {
-				const timeStr = this.formatTimestamp(currentTimestamp);
 				const speakerLabel = this.getSpeakerLabel(currentSpeaker);
-				lines.push(`**${speakerLabel}** *(${timeStr})*: ${cleanText}`)
+				if (this.settings.includeTranscriptTimestamps) {
+					const timeStr = this.formatTimestamp(currentTimestamp);
+					lines.push(`**${speakerLabel}** *(${timeStr})*: ${cleanText}`);
+				} else {
+					lines.push(`**${speakerLabel}**: ${cleanText}`);
+				}
 			}
 			currentText = "";
 			currentSpeaker = null;
@@ -2203,8 +2208,23 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				toggle.onChange(async (value) => {
 					this.plugin.settings.includeFullTranscript = value;
 					await this.plugin.saveSettings();
+					this.display(); // Refresh to show/hide timestamp setting
 				});
 			});
+
+		// Show transcript timestamps toggle only when full transcript is enabled
+		if (this.plugin.settings.includeFullTranscript) {
+			new obsidian.Setting(containerEl)
+				.setName('Include transcript timestamps')
+				.setDesc('Show timestamps (HH:MM:SS) next to each speaker in the transcript.')
+				.addToggle(toggle => {
+					toggle.setValue(this.plugin.settings.includeTranscriptTimestamps);
+					toggle.onChange(async (value) => {
+						this.plugin.settings.includeTranscriptTimestamps = value;
+						await this.plugin.saveSettings();
+					});
+				});
+		}
 
 		// Create a heading for filename settings
 		containerEl.createEl('h3', {text: 'Filename settings'});
