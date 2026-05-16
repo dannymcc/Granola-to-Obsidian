@@ -7,7 +7,9 @@ on:
 
 permissions:
   contents: write
-  
+  id-token: write
+  attestations: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -92,24 +94,17 @@ jobs:
           if [[ ! -f "versions.json" ]]; then echo "versions.json not found"; exit 1; fi
           echo "All plugin files verified ✅"
       
-      - name: Create plugin zip
-        run: |
-          # Create folder with plugin name
-          mkdir granola-sync-plus
-          
-          # Copy plugin files to folder
-          cp main.js granola-sync-plus/
-          cp manifest.json granola-sync-plus/
-          cp styles.css granola-sync-plus/
-          cp versions.json granola-sync-plus/
-          
-          # Create zip file with just version number
-          zip -r ${{ steps.version.outputs.VERSION }}.zip granola-sync-plus/
-          
-          # Verify zip was created
-          ls -la *.zip
-          echo "Plugin zip created: ${{ steps.version.outputs.VERSION }}.zip ✅"
-          
+      - name: Attest build provenance for main.js
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'main.js'
+
+      - name: Attest build provenance for styles.css
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'styles.css'
+
+
       - name: Extract changelog for this version
         id: changelog
         run: |
@@ -149,30 +144,27 @@ jobs:
           
 
       - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           # Read the extracted changelog
           CHANGELOG_CONTENT=$(cat RELEASE_CHANGELOG.txt)
-          
-          gh release create ${{ steps.version.outputs.VERSION }} \
-            --title "Granola Sync Plus ${{ steps.version.outputs.VERSION }}" \
-            --notes "## 🚀 Granola Sync Plus ${{ steps.version.outputs.VERSION }}
-            
-            $CHANGELOG_CONTENT
-            
-            ---
-            
-            ### 📦 Installation Options
-            
-            **Option 1: Download ZIP (Recommended)**
-            1. Download \`${{ steps.version.outputs.VERSION }}.zip\`
-            2. Extract the \`granola-sync-plus\` folder to \`.obsidian/plugins/\` in your vault
-            3. Enable the plugin in Obsidian Settings → Community Plugins
-            
-            **Option 2: Manual Installation**  
-            1. Download individual files: \`main.js\`, \`manifest.json\`, \`styles.css\`, \`versions.json\`
-            2. Create folder \`.obsidian/plugins/granola-sync-plus/\` in your vault
-            3. Place all files in the folder
-            4. Enable the plugin in Obsidian Settings → Community Plugins" \
-            main.js manifest.json styles.css versions.json ${{ steps.version.outputs.VERSION }}.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          gh release create "$VERSION" \
+            --title "Granola Sync Plus $VERSION" \
+            --notes "## 🚀 Granola Sync Plus $VERSION
+
+          $CHANGELOG_CONTENT
+
+          ---
+
+          ### 📦 Installation
+
+          1. Download \`main.js\`, \`manifest.json\`, and \`styles.css\` below
+          2. Create folder \`.obsidian/plugins/granola-sync-plus/\` in your vault
+          3. Place all three files in the folder
+          4. Enable the plugin in Obsidian Settings → Community Plugins
+
+          Builds are signed with [GitHub artifact attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds). Verify with \`gh attestation verify main.js --repo dannymcc/Granola-to-Obsidian\`." \
+            main.js manifest.json styles.css

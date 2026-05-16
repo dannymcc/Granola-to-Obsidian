@@ -35,6 +35,17 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **🛡️ Smart File Conflict Handling**: Skip duplicate filenames or create timestamped versions automatically
 - **📁 Granola Folder Organization**: Mirror your Granola folder structure in Obsidian with automatic folder-based tagging
 
+## 🔒 Network use & background activity
+
+This plugin reads your Granola notes from the official Granola API. You should know exactly what it does on the network and when:
+
+- **Hosts contacted**: only `api.granola.ai`. No telemetry, analytics, error reporting, or third-party services. The plugin has no other network code paths.
+- **What is sent**: standard Granola API requests using the access token from your local Granola install (the same token Granola itself uses). Nothing is sent to any other host.
+- **What triggers a request**: a manual sync (ribbon icon / command palette), or — if you opt in — an **Auto-sync** timer. Auto-sync uses `setInterval` at the frequency you choose in settings, and each tick makes the same set of Granola API calls a manual sync would.
+- **Turning background activity off**: set **Settings → Granola Sync Plus → Auto-sync frequency** to **Disabled**. The interval is cleared immediately and the plugin only contacts Granola when you ask it to.
+
+The plugin is also marked `isDesktopOnly` and reads credentials from your local Granola install — it does not work without Granola installed on the same machine.
+
 ## 📦 Installation
 
 ### Manual Installation

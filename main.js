@@ -400,24 +400,35 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	async loadCredentials() {
 		const homedir = require('os').homedir();
+		// Order matters: stored-accounts.json (May 2026 format) is tried first because
+		// a stale supabase.json left behind by older Granola versions will otherwise
+		// short-circuit the lookup with an expired token and never fall through. See #56.
+		const storedAccountsPath = obsidian.Platform.isWin
+			? path.resolve(homedir, 'AppData/Roaming/Granola/stored-accounts.json')
+			: obsidian.Platform.isLinux
+				? path.resolve(homedir, '.config/Granola/stored-accounts.json')
+				: path.resolve(homedir, 'Library/Application Support/Granola/stored-accounts.json');
+
 		const authPaths = [
-			// New location (with Users in path)
-			path.resolve(homedir, 'Users', require('os').userInfo().username, 'Library/Application Support/Granola/supabase.json'),
-			// Current configured path
+			storedAccountsPath,
+			// Configured path (default: legacy supabase.json — kept for users on older Granola builds)
 			path.resolve(homedir, this.settings.authKeyPath),
-			// Fallback to old default location
-			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json'),
-			// May 2026: Granola migrated to encrypted on-disk storage; tokens now live in stored-accounts.json
-			...(obsidian.Platform.isWin
-				? [path.resolve(homedir, 'AppData/Roaming/Granola/stored-accounts.json')]
-				: obsidian.Platform.isLinux
-					? [path.resolve(homedir, '.config/Granola/stored-accounts.json')]
-					: [path.resolve(homedir, 'Library/Application Support/Granola/stored-accounts.json')])
+			// Legacy supabase.json fallbacks
+			path.resolve(homedir, 'Users', require('os').userInfo().username, 'Library/Application Support/Granola/supabase.json'),
+			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json')
 		];
 
+		const seen = new Set();
 		for (const authPath of authPaths) {
+			if (seen.has(authPath)) continue;
+			seen.add(authPath);
 			try {
 				if (!fs.existsSync(authPath)) {
+					continue;
+				}
+				// Guard against the configured path resolving to a directory (#56 secondary report)
+				if (!fs.statSync(authPath).isFile()) {
+					console.warn('Granola auth path is not a file, skipping:', authPath);
 					continue;
 				}
 
@@ -1180,8 +1191,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	async processDocument(doc) {
 	try {
-		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
+
+		// Skip documents that have no title yet — Granola often creates the document
+		// as soon as a meeting starts and the user adds a title later. Syncing immediately
+		// would write an "Untitled Granola Note.md" that never gets renamed (#53).
+		// Once the user titles it in Granola, the next sync will pick it up.
+		if (!doc.title || !doc.title.trim()) {
+			console.log('Skipping document ' + docId + ': no title yet, will retry on next sync');
+			return false;
+		}
+
+		const title = doc.title;
 		const transcript = doc.transcript || 'no_transcript';
 
 		// Extract all available content
@@ -1204,22 +1225,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		if (existingFile) {
 			if (this.settings.skipExistingNotes) {
-				// Check if the Granola document has been updated since the note was last synced
-				const outdated = await this.isNoteOutdated(existingFile, doc);
-
-				if (!outdated) {
-					// Note is up to date - only update metadata if needed
-					if (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl) {
-						try {
-							await this.updateExistingNoteMetadata(existingFile, doc);
-						} catch (error) {
-							console.error('Error updating metadata for existing note:', error);
-						}
+				// "Skip existing notes" must never overwrite local edits, even when the
+				// Granola document has been updated. The body is left untouched; only
+				// additive frontmatter (attendee tags, Granola URL, attendee backlinks)
+				// is refreshed so newly enabled features still apply. See #48.
+				if (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl || this.settings.includeAttendeeBacklinks) {
+					try {
+						await this.updateExistingNoteMetadata(existingFile, doc);
+					} catch (error) {
+						console.error('Error updating metadata for existing note:', error);
 					}
-					return true;
 				}
-				// Note is outdated - fall through to full update
-				console.log('Note "' + title + '" has been updated in Granola, re-syncing...');
+				return true;
 			}
 
 			// Update existing note (full update)
@@ -1977,8 +1994,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					return granolaDate > existingDate;
 				}
 			}
-			// No updated_at in frontmatter - treat as outdated so it gets updated
-			return true;
+			// No updated_at in frontmatter — treat as up-to-date so notes from older
+			// plugin versions (which never wrote updated_at) aren't overwritten on every
+			// sync. The note can still be refreshed via the explicit "Reorganize" command.
+			return false;
 		} catch (error) {
 			console.error('Error checking if note is outdated:', error);
 			return false;
