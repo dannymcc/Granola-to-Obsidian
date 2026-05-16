@@ -46,6 +46,32 @@ This plugin reads your Granola notes from the official Granola API. You should k
 
 The plugin is also marked `isDesktopOnly` and reads credentials from your local Granola install — it does not work without Granola installed on the same machine.
 
+## 📁 Permissions & filesystem access
+
+The plugin is marked `isDesktopOnly` because it needs to read Granola's auth token from your operating system, which the mobile sandbox doesn't allow. This section spells out exactly what it does on disk and why.
+
+### Files read outside the vault (read-only, never written)
+
+The plugin uses the Node.js `fs` module to read **one** file outside the vault — Granola's local credentials file — checked at one of these paths depending on your OS:
+
+- **macOS**: `~/Library/Application Support/Granola/stored-accounts.json` (or legacy `supabase.json` for older Granola builds)
+- **Windows**: `%APPDATA%\Granola\stored-accounts.json` (or legacy `supabase.json`)
+- **Linux**: `~/.config/Granola/stored-accounts.json` (or legacy `supabase.json`)
+
+These are the same files the Granola desktop app maintains for its own auth. The plugin extracts the access token from them and uses it for API requests. **Nothing outside the vault is ever written, deleted, or modified.** You can also override the path in **Settings → Auth Key Path**.
+
+### Vault enumeration
+
+To avoid creating duplicate notes when Granola sends the same document twice, the plugin scans for existing notes that carry a matching `granola_id` in their frontmatter. The scope of that scan is configurable:
+
+| Setting (`Existing-note search scope`) | What it scans |
+|---|---|
+| **Sync directory only** *(default, recommended)* | Only the folder you've configured as the sync directory (and its subfolders). |
+| **Specific folders** | A user-defined list of folders. |
+| **Entire vault** | Every markdown file in the vault. Slowest; only needed if you move synced notes outside the sync directory. |
+
+During the scan the plugin reads each candidate file's frontmatter via the standard Obsidian `vault.read` API in order to extract the `granola_id` field; no other field is inspected and no file is modified by the scan.
+
 ## 📦 Installation
 
 ### Manual Installation
