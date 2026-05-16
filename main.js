@@ -31,6 +31,8 @@ const DEFAULT_SETTINGS = {
 	includeFolderTags: false,
 	includeGranolaUrl: false,
 	attendeeTagTemplate: 'person/{name}',
+	includeAttendeeBacklinks: false, // Write attendee names as Obsidian wikilinks in frontmatter
+	attendeeBacklinkProperty: 'participants', // Frontmatter property name for attendee backlinks
 	existingNoteSearchScope: 'syncDirectory', // 'syncDirectory', 'entireVault', 'specificFolders'
 	specificSearchFolders: [], // Array of folder paths to search in when existingNoteSearchScope is 'specificFolders'
 	enableDateBasedFolders: false,
@@ -1237,7 +1239,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const allTags = [...attendeeTags, ...folderTags];
 
 				// Build frontmatter using centralized helper
-				const frontmatter = this.buildFrontmatter(doc, title, allTags, granolaUrl);
+				const frontmatter = this.buildFrontmatter(doc, title, allTags, granolaUrl, attendeeNames);
 
 				// Build the note content with all sections
 				const noteContent = this.buildNoteContent(doc, transcript);
@@ -1267,7 +1269,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const allTags = [...attendeeTags, ...folderTags];
 
 		// Build frontmatter using centralized helper
-		const frontmatter = this.buildFrontmatter(doc, title, allTags, granolaUrl);
+		const frontmatter = this.buildFrontmatter(doc, title, allTags, granolaUrl, attendeeNames);
 
 		// Build the note content with all sections
 		const noteContent = this.buildNoteContent(doc, transcript);
@@ -1701,6 +1703,30 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return tags;
 	}
 
+	generateAttendeeBacklinks(attendees) {
+		if (!this.settings.includeAttendeeBacklinks || !attendees || attendees.length === 0) {
+			return [];
+		}
+
+		const backlinks = [];
+
+		for (const attendee of attendees) {
+			// Apply the same "my name" exclusion as attendee tags
+			if (this.settings.excludeMyNameFromTags && this.settings.myName &&
+				attendee.toLowerCase().trim() === this.settings.myName.toLowerCase().trim()) {
+				continue;
+			}
+
+			const link = '[[' + attendee.trim() + ']]';
+
+			if (!backlinks.includes(link)) {
+				backlinks.push(link);
+			}
+		}
+
+		return backlinks;
+	}
+
 	extractFolderNames(doc) {
 		const folderNames = [];
 		
@@ -1882,7 +1908,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	 * @param {string} granolaUrl - Granola URL (or null)
 	 * @returns {string} - Complete frontmatter string with delimiters
 	 */
-	buildFrontmatter(doc, title, allTags, granolaUrl) {
+	buildFrontmatter(doc, title, allTags, granolaUrl, attendeeNames = []) {
 		const docId = doc.id;
 		let frontmatter = '---\n';
 		
@@ -1917,7 +1943,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				frontmatter += '  - ' + tag + '\n';
 			}
 		}
-		
+
+		// Attendee backlinks (optional wikilinks in a separate frontmatter property)
+		const attendeeBacklinks = this.generateAttendeeBacklinks(attendeeNames);
+		if (attendeeBacklinks.length > 0) {
+			const prop = this.settings.attendeeBacklinkProperty || 'participants';
+			frontmatter += prop + ':\n';
+			for (const link of attendeeBacklinks) {
+				frontmatter += '  - "' + link + '"\n';
+			}
+		}
+
 		// Additional custom frontmatter
 		const additionalFm = this.parseAdditionalFrontmatter();
 		if (additionalFm) {
@@ -1958,6 +1994,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const folderTags = this.generateFolderTags(folderNames);
 			const granolaUrl = this.generateGranolaUrl(doc.id);
 
+			const attendeeBacklinks = this.generateAttendeeBacklinks(attendeeNames);
+
 			// Use FileManager.processFrontMatter for atomic frontmatter updates
 			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 				// Preserve existing tags that are not person or folder tags
@@ -1971,6 +2009,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 				// Update tags
 				frontmatter.tags = [...preservedTags, ...newTags];
+
+				// Update or add attendee backlinks if enabled
+				if (attendeeBacklinks.length > 0) {
+					const prop = this.settings.attendeeBacklinkProperty || 'participants';
+					frontmatter[prop] = attendeeBacklinks;
+				}
 
 				// Update or add Granola URL if enabled
 				if (granolaUrl) {
@@ -2563,6 +2607,29 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 						new obsidian.Notice('Warning: Tag template should include {name} placeholder');
 					}
 					this.plugin.settings.attendeeTagTemplate = value || 'person/{name}';
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Include attendee backlinks')
+			.setDesc('Add meeting attendees as Obsidian wikilinks in a separate frontmatter property (e.g. participants: ["[[Eddie Brock]]"])')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.includeAttendeeBacklinks);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.includeAttendeeBacklinks = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Attendee backlink property')
+			.setDesc('Frontmatter property name used for attendee wikilinks (default: participants)')
+			.addText(text => {
+				text.setPlaceholder('participants');
+				text.setValue(this.plugin.settings.attendeeBacklinkProperty);
+				text.onChange(async (value) => {
+					this.plugin.settings.attendeeBacklinkProperty = value || 'participants';
 					await this.plugin.saveSettings();
 				});
 			});
