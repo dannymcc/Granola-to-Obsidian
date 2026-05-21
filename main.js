@@ -13,6 +13,120 @@ function getDefaultAuthPath() {
 	}
 }
 
+// Decode a JWT's `exp` claim and return true when the token is past (or within
+// the skew window of) expiry. Used to skip stale credential files instead of
+// short-circuiting on the first parseable one — see #58, where Granola 7.255+
+// stopped refreshing the plaintext stored-accounts.json so the cached token
+// was permanently expired.
+function isJwtExpired(token, skewSeconds = 30) {
+	try {
+		const parts = token.split('.');
+		if (parts.length !== 3) return false;
+		let payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+		while (payload.length % 4) payload += '=';
+		const claims = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
+		if (typeof claims.exp !== 'number') return false;
+		return (Date.now() / 1000) >= (claims.exp - skewSeconds);
+	} catch (e) {
+		return false;
+	}
+}
+
+// Pull an access_token out of any of the JSON shapes Granola has used:
+// - workos_tokens (current, JSON-encoded string or object)
+// - cognito_tokens (legacy)
+// - accounts[] (May 2026 multi-account stored-accounts.json)
+function extractAccessTokenFromData(data) {
+	if (data.workos_tokens) {
+		try {
+			const t = typeof data.workos_tokens === 'string' ? JSON.parse(data.workos_tokens) : data.workos_tokens;
+			if (t && t.access_token) return t.access_token;
+		} catch (e) { /* fall through */ }
+	}
+	if (data.cognito_tokens) {
+		try {
+			const t = typeof data.cognito_tokens === 'string' ? JSON.parse(data.cognito_tokens) : data.cognito_tokens;
+			if (t && t.access_token) return t.access_token;
+		} catch (e) { /* fall through */ }
+	}
+	if (data.accounts) {
+		try {
+			const accounts = typeof data.accounts === 'string' ? JSON.parse(data.accounts) : data.accounts;
+			if (Array.isArray(accounts) && accounts.length > 0 && accounts[0].tokens) {
+				const t = typeof accounts[0].tokens === 'string' ? JSON.parse(accounts[0].tokens) : accounts[0].tokens;
+				if (t && t.access_token) return t.access_token;
+			}
+		} catch (e) {
+			console.error('Error parsing stored-accounts accounts array:', e);
+		}
+	}
+	return null;
+}
+
+function readPlainCredentialsToken(filePath) {
+	if (!fs.existsSync(filePath)) return null;
+	if (!fs.statSync(filePath).isFile()) {
+		console.warn('Granola auth path is not a file, skipping:', filePath);
+		return null;
+	}
+	const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+	return extractAccessTokenFromData(data);
+}
+
+// macOS-only: read Granola's safeStorage encryption key from the user's Keychain.
+// The user will see a one-time Keychain Access prompt allowing Obsidian to read
+// the "Granola Safe Storage" item. Returns null if the item is missing or the
+// user denies access.
+function readGranolaKeychainPasswordMac() {
+	try {
+		const { execFileSync } = require('child_process');
+		const out = execFileSync(
+			'/usr/bin/security',
+			['find-generic-password', '-s', 'Granola Safe Storage', '-a', 'Granola', '-w'],
+			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+		);
+		return out.replace(/\n$/, '');
+	} catch (e) {
+		console.warn('Could not read Granola Safe Storage from macOS Keychain:', e.message || e);
+		return null;
+	}
+}
+
+// Decrypt a Chromium os_crypt v10 payload (Electron safeStorage on macOS).
+// Format: 3-byte 'v10' prefix, then AES-128-CBC ciphertext. Key is derived
+// from the Keychain master password via PBKDF2-HMAC-SHA1 (salt 'saltysalt',
+// 1003 iterations, 16-byte key). IV is a fixed 16 spaces.
+function decryptChromiumOsCryptV10(ciphertext, password) {
+	const crypto = require('crypto');
+	if (ciphertext.length <= 3 || ciphertext.slice(0, 3).toString() !== 'v10') {
+		throw new Error('not a Chromium os_crypt v10 payload');
+	}
+	const key = crypto.pbkdf2Sync(password, 'saltysalt', 1003, 16, 'sha1');
+	const iv = Buffer.alloc(16, 0x20);
+	const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+	const decrypted = Buffer.concat([decipher.update(ciphertext.slice(3)), decipher.final()]);
+	return decrypted.toString('utf8');
+}
+
+// macOS-only path for stored-accounts.json.enc (added in Granola 7.255+, see #58).
+// Returns the access_token from the decrypted payload, or null if anything in the
+// pipeline (file missing, no Keychain item, denied prompt, bad payload) fails.
+function readEncryptedCredentialsTokenMac(filePath) {
+	if (!obsidian.Platform.isMacOS) return null;
+	if (!fs.existsSync(filePath)) return null;
+	const ciphertext = fs.readFileSync(filePath);
+	const password = readGranolaKeychainPasswordMac();
+	if (!password) return null;
+	try {
+		const plaintext = decryptChromiumOsCryptV10(ciphertext, password);
+		const data = JSON.parse(plaintext);
+		return extractAccessTokenFromData(data);
+	} catch (e) {
+		console.warn('Failed to decrypt Granola stored-accounts.json.enc:', e.message || e);
+		return null;
+	}
+}
+
 const DEFAULT_SETTINGS = {
 	syncDirectory: 'Granola',
 	notePrefix: '',
@@ -400,87 +514,63 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	async loadCredentials() {
 		const homedir = require('os').homedir();
-		// Order matters: stored-accounts.json (May 2026 format) is tried first because
-		// a stale supabase.json left behind by older Granola versions will otherwise
-		// short-circuit the lookup with an expired token and never fall through. See #56.
-		const storedAccountsPath = obsidian.Platform.isWin
-			? path.resolve(homedir, 'AppData/Roaming/Granola/stored-accounts.json')
-			: obsidian.Platform.isLinux
-				? path.resolve(homedir, '.config/Granola/stored-accounts.json')
-				: path.resolve(homedir, 'Library/Application Support/Granola/stored-accounts.json');
 
-		const authPaths = [
-			storedAccountsPath,
-			// Configured path (default: legacy supabase.json — kept for users on older Granola builds)
-			path.resolve(homedir, this.settings.authKeyPath),
-			// Legacy supabase.json fallbacks
-			path.resolve(homedir, 'Users', require('os').userInfo().username, 'Library/Application Support/Granola/supabase.json'),
-			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json')
+		const granolaDir = obsidian.Platform.isWin
+			? path.resolve(homedir, 'AppData/Roaming/Granola')
+			: obsidian.Platform.isLinux
+				? path.resolve(homedir, '.config/Granola')
+				: path.resolve(homedir, 'Library/Application Support/Granola');
+
+		const storedAccountsPath = path.join(granolaDir, 'stored-accounts.json');
+		const storedAccountsEncPath = path.join(granolaDir, 'stored-accounts.json.enc');
+
+		// Candidate sources, tried in order. We collect the first non-expired token we
+		// find rather than returning the first parseable one, so a stale plaintext file
+		// (Granola 7.255+ stops refreshing it — see #58) can't mask a fresh encrypted
+		// source. If every source is expired, we still return the first parseable one
+		// so behaviour is no worse than before this fix.
+		const candidates = [
+			{ kind: 'enc-mac', filePath: storedAccountsEncPath },
+			{ kind: 'plain', filePath: storedAccountsPath },
+			{ kind: 'plain', filePath: path.resolve(homedir, this.settings.authKeyPath) },
+			{ kind: 'plain', filePath: path.resolve(homedir, 'Users', require('os').userInfo().username, 'Library/Application Support/Granola/supabase.json') },
+			{ kind: 'plain', filePath: path.resolve(homedir, 'Library/Application Support/Granola/supabase.json') }
 		];
 
+		let staleFallback = null;
 		const seen = new Set();
-		for (const authPath of authPaths) {
-			if (seen.has(authPath)) continue;
-			seen.add(authPath);
+		for (const cand of candidates) {
+			const dedupeKey = cand.kind + ':' + cand.filePath;
+			if (seen.has(dedupeKey)) continue;
+			seen.add(dedupeKey);
+
+			let token = null;
 			try {
-				if (!fs.existsSync(authPath)) {
-					continue;
-				}
-				// Guard against the configured path resolving to a directory (#56 secondary report)
-				if (!fs.statSync(authPath).isFile()) {
-					console.warn('Granola auth path is not a file, skipping:', authPath);
-					continue;
-				}
-
-				const credentialsFile = fs.readFileSync(authPath, 'utf8');
-				const data = JSON.parse(credentialsFile);
-				
-				let accessToken = null;
-				
-				// Try new token structure (workos_tokens)
-				if (data.workos_tokens) {
-					try {
-						const workosTokens = JSON.parse(data.workos_tokens);
-						accessToken = workosTokens.access_token;
-					} catch (e) {
-						// workos_tokens might already be an object
-						accessToken = data.workos_tokens.access_token;
-					}
-				}
-				
-				// Fallback to old token structure (cognito_tokens)
-				if (!accessToken && data.cognito_tokens) {
-					try {
-						const cognitoTokens = JSON.parse(data.cognito_tokens);
-						accessToken = cognitoTokens.access_token;
-					} catch (e) {
-						// cognito_tokens might already be an object
-						accessToken = data.cognito_tokens.access_token;
-					}
-				}
-
-				// May 2026 multi-account format (stored-accounts.json):
-				// { accounts: "[{ tokens: \"{access_token,refresh_token,...}\", userInfo, ... }]" }
-				if (!accessToken && data.accounts) {
-					try {
-						const accounts = typeof data.accounts === 'string' ? JSON.parse(data.accounts) : data.accounts;
-						if (Array.isArray(accounts) && accounts.length > 0 && accounts[0].tokens) {
-							const tokens = typeof accounts[0].tokens === 'string' ? JSON.parse(accounts[0].tokens) : accounts[0].tokens;
-							accessToken = tokens && tokens.access_token;
-						}
-					} catch (e) {
-						console.error('Error parsing stored-accounts.json accounts:', e);
-					}
-				}
-
-				if (accessToken) {
-					console.log('Successfully loaded credentials from:', authPath);
-					return accessToken;
+				if (cand.kind === 'enc-mac') {
+					if (!obsidian.Platform.isMacOS) continue;
+					token = readEncryptedCredentialsTokenMac(cand.filePath);
+				} else {
+					token = readPlainCredentialsToken(cand.filePath);
 				}
 			} catch (error) {
-				console.error('Error reading credentials from', authPath, ':', error);
+				console.error('Error reading credentials from', cand.filePath, ':', error.message || error);
 				continue;
 			}
+
+			if (!token) continue;
+
+			if (!isJwtExpired(token)) {
+				console.log('Successfully loaded credentials from:', cand.filePath);
+				return token;
+			}
+			if (!staleFallback) {
+				staleFallback = { token, filePath: cand.filePath };
+			}
+		}
+
+		if (staleFallback) {
+			console.warn('All Granola credential sources hold expired tokens; using stale token from:', staleFallback.filePath, '— the next API call will likely 401. Restart Granola or reauthenticate to refresh.');
+			return staleFallback.token;
 		}
 
 		console.error('No valid credentials found in any of the expected locations');

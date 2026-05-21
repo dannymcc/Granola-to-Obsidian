@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.0] - 2026-05-21
+
+### Fixed
+- **🔐 401s on Granola 7.255+ where the plaintext token file is frozen**: Recent Granola desktop builds stopped refreshing `stored-accounts.json` and now write auth state only to the encrypted `stored-accounts.json.enc` (Electron safeStorage) and `granola.db` (SQLCipher). The plugin was reading the frozen plaintext file, getting an expired JWT, and 401ing on every sync. The credential loader now decodes each candidate token's `exp` claim and picks the freshest source rather than the first parseable one (Fixes [#58](https://github.com/dannymcc/Granola-to-Obsidian/issues/58)).
+
+### Added
+- **🔓 macOS: decrypt `stored-accounts.json.enc` via the Keychain**: On macOS, the plugin can now read Granola's encrypted auth store directly. It reads Granola's safeStorage master key from the user's Keychain (you'll see a one-time Keychain Access prompt allowing Obsidian to read the "Granola Safe Storage" item) and decrypts the Chromium os_crypt v10 payload locally. No tokens leave the machine. Linux and Windows users still rely on the plaintext fallbacks for now — open an issue if you're hitting #58-style failures on those platforms.
+
+### Credits
+- Thanks to [@francescocinori-ops](https://github.com/francescocinori-ops) for the thorough diagnosis in [#58](https://github.com/dannymcc/Granola-to-Obsidian/issues/58), including the JWT-exp short-circuit analysis and the Chromium os_crypt v10 format reference that made the macOS decryption path straightforward.
+
 ## [1.10.0] - 2026-05-16
 
 ### Fixed
