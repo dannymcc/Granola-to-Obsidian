@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.1] - 2026-05-22
+
+### Fixed
+- **🔐 macOS encrypted-credentials path now actually decrypts on Granola 7.255+**: 1.11.0 added the right code paths but two implementation details prevented them from running on real installs. The Keychain lookup was for account `Granola` but the real account is `Granola Key`, so `find-generic-password` silently returned "item not found" and the encrypted path fell back to the plain `stored-accounts.json` — itself a startup-only snapshot, hence the bug stayed hidden for the first ~6h of every Granola session. Once the Keychain lookup worked, decryption still failed because the `.enc` files are not Chromium os_crypt v10 payloads. Granola uses a two-level scheme: `storage.dek` is an os_crypt v10 envelope wrapping a base64-encoded 32-byte DEK, and the `*.json.enc` files are AES-256-GCM (`[12-byte nonce][ciphertext][16-byte tag]`, empty AAD) using that DEK. The plugin now performs both steps correctly, with strict base64-alphabet validation on the wrapped DEK. Reported in [#58](https://github.com/dannymcc/Granola-to-Obsidian/issues/58) and [#61](https://github.com/dannymcc/Granola-to-Obsidian/issues/61).
+
+### Known issues
+- **6h JWT staleness after Granola has been running a session**: `stored-accounts.json.enc` is written by Granola only at app startup, so the access token inside expires roughly 6h after the desktop app was launched. After that, the plugin's freshness check correctly identifies all file-based sources as expired and 401s on the next sync. The only continuously-fresh source is `granola.db` (SQLCipher); a reader for that is in active investigation on the `investigate/granola-db` branch and tracked in [#58](https://github.com/dannymcc/Granola-to-Obsidian/issues/58). **Workaround until then**: restart Granola to rewrite the encrypted snapshot with a fresh token.
+
+### Credits
+- Huge thanks to [@francescocinori-ops](https://github.com/francescocinori-ops) for the reverse-engineering (wrong Keychain account, two-level format hypothesis, GCM layout arithmetic) and to [@chuckchuck512](https://github.com/chuckchuck512) for independent corroboration plus the catch that the DEK is base64-wrapped inside the v10 envelope. This release shipped because both of you ran patches against real installs and reported back precisely.
+
 ## [1.11.0] - 2026-05-21
 
 ### Fixed
