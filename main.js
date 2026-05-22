@@ -73,16 +73,16 @@ function readPlainCredentialsToken(filePath) {
 	return extractAccessTokenFromData(data);
 }
 
-// macOS-only: read Granola's safeStorage encryption key from the user's Keychain.
+// macOS-only: read Granola's safeStorage master password from the user's Keychain.
 // The user will see a one-time Keychain Access prompt allowing Obsidian to read
-// the "Granola Safe Storage" item. Returns null if the item is missing or the
-// user denies access.
+// the "Granola Safe Storage" / "Granola Key" item. Returns null if the item is
+// missing or the user denies access.
 function readGranolaKeychainPasswordMac() {
 	try {
 		const { execFileSync } = require('child_process');
 		const out = execFileSync(
 			'/usr/bin/security',
-			['find-generic-password', '-s', 'Granola Safe Storage', '-a', 'Granola', '-w'],
+			['find-generic-password', '-s', 'Granola Safe Storage', '-a', 'Granola Key', '-w'],
 			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
 		);
 		return out.replace(/\n$/, '');
@@ -95,7 +95,8 @@ function readGranolaKeychainPasswordMac() {
 // Decrypt a Chromium os_crypt v10 payload (Electron safeStorage on macOS).
 // Format: 3-byte 'v10' prefix, then AES-128-CBC ciphertext. Key is derived
 // from the Keychain master password via PBKDF2-HMAC-SHA1 (salt 'saltysalt',
-// 1003 iterations, 16-byte key). IV is a fixed 16 spaces.
+// 1003 iterations, 16-byte key). IV is a fixed 16 spaces. Returns raw bytes;
+// callers decode to UTF-8 when the payload is text.
 function decryptChromiumOsCryptV10(ciphertext, password) {
 	const crypto = require('crypto');
 	if (ciphertext.length <= 3 || ciphertext.slice(0, 3).toString() !== 'v10') {
@@ -104,25 +105,64 @@ function decryptChromiumOsCryptV10(ciphertext, password) {
 	const key = crypto.pbkdf2Sync(password, 'saltysalt', 1003, 16, 'sha1');
 	const iv = Buffer.alloc(16, 0x20);
 	const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
-	const decrypted = Buffer.concat([decipher.update(ciphertext.slice(3)), decipher.final()]);
-	return decrypted.toString('utf8');
+	return Buffer.concat([decipher.update(ciphertext.slice(3)), decipher.final()]);
+}
+
+// Read and decrypt Granola's storage.dek (51 bytes), itself an os_crypt v10
+// payload wrapping the 32-byte Data Encryption Key used for the *.json.enc files.
+function readGranolaDekMac(granolaDir, keychainPassword) {
+	const dekPath = path.join(granolaDir, 'storage.dek');
+	if (!fs.existsSync(dekPath)) {
+		console.warn('Granola storage.dek not found at:', dekPath);
+		return null;
+	}
+	try {
+		const ciphertext = fs.readFileSync(dekPath);
+		const dek = decryptChromiumOsCryptV10(ciphertext, keychainPassword);
+		if (dek.length !== 32) {
+			console.warn('Granola storage.dek decrypted to', dek.length, 'bytes; expected 32');
+			return null;
+		}
+		return dek;
+	} catch (e) {
+		console.warn('Failed to decrypt Granola storage.dek:', e.message || e);
+		return null;
+	}
+}
+
+// Decrypt a Granola *.json.enc file (AES-256-GCM with the DEK from storage.dek).
+// Layout: [12-byte nonce][ciphertext][16-byte GCM tag], empty AAD.
+function decryptGranolaEncFile(ciphertext, dek) {
+	const crypto = require('crypto');
+	if (ciphertext.length < 12 + 16) {
+		throw new Error('Granola .enc file too short to contain nonce + tag');
+	}
+	const nonce = ciphertext.slice(0, 12);
+	const tag = ciphertext.slice(ciphertext.length - 16);
+	const data = ciphertext.slice(12, ciphertext.length - 16);
+	const decipher = crypto.createDecipheriv('aes-256-gcm', dek, nonce);
+	decipher.setAuthTag(tag);
+	return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
 // macOS-only path for stored-accounts.json.enc (added in Granola 7.255+, see #58).
-// Returns the access_token from the decrypted payload, or null if anything in the
-// pipeline (file missing, no Keychain item, denied prompt, bad payload) fails.
+// Two-level decrypt: storage.dek is os_crypt v10 (master from Keychain) wrapping a
+// 32-byte DEK; the .enc file is AES-256-GCM using that DEK. Returns the access_token
+// or null if anything in the pipeline fails.
 function readEncryptedCredentialsTokenMac(filePath) {
 	if (!obsidian.Platform.isMacOS) return null;
 	if (!fs.existsSync(filePath)) return null;
-	const ciphertext = fs.readFileSync(filePath);
 	const password = readGranolaKeychainPasswordMac();
 	if (!password) return null;
+	const dek = readGranolaDekMac(path.dirname(filePath), password);
+	if (!dek) return null;
 	try {
-		const plaintext = decryptChromiumOsCryptV10(ciphertext, password);
+		const ciphertext = fs.readFileSync(filePath);
+		const plaintext = decryptGranolaEncFile(ciphertext, dek);
 		const data = JSON.parse(plaintext);
 		return extractAccessTokenFromData(data);
 	} catch (e) {
-		console.warn('Failed to decrypt Granola stored-accounts.json.enc:', e.message || e);
+		console.warn('Failed to decrypt Granola encrypted credentials file:', e.message || e);
 		return null;
 	}
 }
