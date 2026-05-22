@@ -108,8 +108,11 @@ function decryptChromiumOsCryptV10(ciphertext, password) {
 	return Buffer.concat([decipher.update(ciphertext.slice(3)), decipher.final()]);
 }
 
-// Read and decrypt Granola's storage.dek (51 bytes), itself an os_crypt v10
-// payload wrapping the 32-byte Data Encryption Key used for the *.json.enc files.
+// Read and decrypt Granola's storage.dek (typically 51 or 63 bytes), itself an
+// os_crypt v10 payload wrapping the 32-byte Data Encryption Key used for the
+// *.json.enc files. Granola has shipped two shapes inside the envelope:
+//   - 32 raw bytes (the AES-256 key directly), or
+//   - 44 ASCII bytes (the same key base64-encoded — ceil(32/3)*4 = 44).
 function readGranolaDekMac(granolaDir, keychainPassword) {
 	const dekPath = path.join(granolaDir, 'storage.dek');
 	if (!fs.existsSync(dekPath)) {
@@ -118,12 +121,18 @@ function readGranolaDekMac(granolaDir, keychainPassword) {
 	}
 	try {
 		const ciphertext = fs.readFileSync(dekPath);
-		const dek = decryptChromiumOsCryptV10(ciphertext, keychainPassword);
-		if (dek.length !== 32) {
-			console.warn('Granola storage.dek decrypted to', dek.length, 'bytes; expected 32');
-			return null;
+		const decrypted = decryptChromiumOsCryptV10(ciphertext, keychainPassword);
+		if (decrypted.length === 32) return decrypted;
+		if (decrypted.length === 44) {
+			const ascii = decrypted.toString('ascii');
+			// Strict base64 alphabet (standard or URL-safe) + a single '=' pad.
+			if (/^(?:[A-Za-z0-9+/]{43}=|[A-Za-z0-9_-]{43}=)$/.test(ascii)) {
+				const decoded = Buffer.from(ascii, 'base64');
+				if (decoded.length === 32) return decoded;
+			}
 		}
-		return dek;
+		console.warn('Granola storage.dek decrypted to unexpected', decrypted.length, 'bytes; cannot derive 32-byte DEK');
+		return null;
 	} catch (e) {
 		console.warn('Failed to decrypt Granola storage.dek:', e.message || e);
 		return null;
