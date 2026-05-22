@@ -1279,6 +1279,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return doc.content;
 		}
 
+		// Fallback: for my_notes, check doc.notes (used for manually-created notes
+		// and notes without a recording — see issue #33 scottxp comment).
+		if (panelType === 'my_notes' && doc.notes && doc.notes.type === 'doc') {
+			return doc.notes;
+		}
+
 		return null;
 	}
 
