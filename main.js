@@ -92,6 +92,59 @@ function readGranolaKeychainPasswordMac() {
 	}
 }
 
+// macOS Keychain storage for the plugin's own Granola API key, so it never
+// sits in plaintext in data.json (which lives inside the vault and travels
+// with vault sync/backups). Items created via /usr/bin/security are readable
+// back by the same binary without a Keychain prompt.
+const API_KEY_KEYCHAIN_SERVICE = 'granola-sync-plus';
+const API_KEY_KEYCHAIN_ACCOUNT = 'granola-api-key';
+
+function storeApiKeyInKeychainMac(apiKey) {
+	try {
+		const { execFileSync } = require('child_process');
+		// -U updates the item in place if it already exists. The key appears
+		// in the security process's argv for the duration of the call; that
+		// is the standard tradeoff of the security CLI (no shell involved).
+		execFileSync(
+			'/usr/bin/security',
+			['add-generic-password', '-U', '-s', API_KEY_KEYCHAIN_SERVICE, '-a', API_KEY_KEYCHAIN_ACCOUNT, '-w', apiKey],
+			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+		);
+		return true;
+	} catch (e) {
+		console.error('Could not store Granola API key in macOS Keychain:', e.message || e);
+		return false;
+	}
+}
+
+function readApiKeyFromKeychainMac() {
+	try {
+		const { execFileSync } = require('child_process');
+		const out = execFileSync(
+			'/usr/bin/security',
+			['find-generic-password', '-s', API_KEY_KEYCHAIN_SERVICE, '-a', API_KEY_KEYCHAIN_ACCOUNT, '-w'],
+			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+		);
+		return out.replace(/\n$/, '');
+	} catch (e) {
+		console.warn('Could not read Granola API key from macOS Keychain:', e.message || e);
+		return null;
+	}
+}
+
+function deleteApiKeyFromKeychainMac() {
+	try {
+		const { execFileSync } = require('child_process');
+		execFileSync(
+			'/usr/bin/security',
+			['delete-generic-password', '-s', API_KEY_KEYCHAIN_SERVICE, '-a', API_KEY_KEYCHAIN_ACCOUNT],
+			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+		);
+	} catch (e) {
+		// Item may simply not exist; nothing to do
+	}
+}
+
 // Decrypt a Chromium os_crypt v10 payload (Electron safeStorage on macOS).
 // Format: 3-byte 'v10' prefix, then AES-128-CBC ciphertext. Key is derived
 // from the Keychain master password via PBKDF2-HMAC-SHA1 (salt 'saltysalt',
@@ -180,7 +233,8 @@ const DEFAULT_SETTINGS = {
 	syncDirectory: 'Granola',
 	notePrefix: '',
 	authMode: 'local', // 'local' - read token from the Granola desktop app, 'api' - official Granola API key
-	granolaApiKey: '', // Official API key (grn_...), Business/Enterprise plans only
+	granolaApiKey: '', // Official API key (grn_...), Business/Enterprise plans only; empty on macOS where the key lives in the Keychain
+	apiKeyStoredInKeychain: false, // macOS: key is stored in the Keychain instead of data.json
 	lastApiSync: '', // ISO timestamp of the last successful API-mode sync, used for incremental fetching
 	authKeyPath: getDefaultAuthPath(),
 	filenameTemplate: '{title}',
@@ -238,6 +292,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 		} catch (error) {
 			// Could not load settings, using defaults
+		}
+
+		try {
+			await this.migrateApiKeyToKeychain();
+		} catch (error) {
+			console.error('Granola Sync: API key Keychain migration failed:', error);
 		}
 
 		this.statusBarItem = this.addStatusBarItem();
@@ -735,7 +795,74 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	isApiMode() {
-		return this.settings.authMode === 'api' && !!(this.settings.granolaApiKey || '').trim();
+		return this.settings.authMode === 'api' &&
+			(this.settings.apiKeyStoredInKeychain || !!(this.settings.granolaApiKey || '').trim());
+	}
+
+	/**
+	 * Returns the Granola API key from its storage backend: macOS Keychain
+	 * when apiKeyStoredInKeychain is set, plaintext settings otherwise.
+	 * Cached in memory so a sync's many requests don't each spawn a
+	 * security(1) process.
+	 */
+	getApiKey() {
+		if (this._apiKeyCache) {
+			return this._apiKeyCache;
+		}
+		let key = null;
+		if (this.settings.apiKeyStoredInKeychain && obsidian.Platform.isMacOS) {
+			key = readApiKeyFromKeychainMac();
+		} else {
+			key = (this.settings.granolaApiKey || '').trim() || null;
+		}
+		this._apiKeyCache = key;
+		return key;
+	}
+
+	/**
+	 * Stores the Granola API key. On macOS the key goes into the Keychain and
+	 * only a flag is persisted in data.json; elsewhere it is stored in
+	 * settings as before. An empty value clears both backends.
+	 */
+	async setApiKey(value) {
+		const key = (value || '').trim();
+		this._apiKeyCache = null;
+
+		if (obsidian.Platform.isMacOS) {
+			if (!key) {
+				deleteApiKeyFromKeychainMac();
+				this.settings.apiKeyStoredInKeychain = false;
+				this.settings.granolaApiKey = '';
+			} else if (storeApiKeyInKeychainMac(key)) {
+				this.settings.apiKeyStoredInKeychain = true;
+				this.settings.granolaApiKey = '';
+			} else {
+				// Keychain write failed; fall back to plaintext so the user
+				// isn't silently left without a working key
+				this.settings.apiKeyStoredInKeychain = false;
+				this.settings.granolaApiKey = key;
+			}
+		} else {
+			this.settings.apiKeyStoredInKeychain = false;
+			this.settings.granolaApiKey = key;
+		}
+
+		await this.saveSettings();
+	}
+
+	/**
+	 * One-time migration: if a plaintext key is sitting in data.json on
+	 * macOS (written by an older version or by hand), move it into the
+	 * Keychain and scrub it from disk.
+	 */
+	async migrateApiKeyToKeychain() {
+		if (!obsidian.Platform.isMacOS) return;
+		const plaintextKey = (this.settings.granolaApiKey || '').trim();
+		if (!plaintextKey) return;
+		await this.setApiKey(plaintextKey);
+		if (this.settings.apiKeyStoredInKeychain) {
+			console.log('Granola Sync: migrated API key from data.json to the macOS Keychain');
+		}
 	}
 
 	/**
@@ -744,7 +871,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	 * sync loop can surface a clear error; returns null on other failures.
 	 */
 	async apiRequest(endpoint, params = {}) {
-		const apiKey = this.settings.granolaApiKey.trim();
+		const apiKey = this.getApiKey();
+		if (!apiKey) {
+			throw new Error('Could not read the Granola API key' + (this.settings.apiKeyStoredInKeychain ? ' from the macOS Keychain.' : '. Set one in the plugin settings.'));
+		}
 		let url = 'https://public-api.granola.ai' + endpoint;
 		const query = Object.entries(params)
 			.filter(([, v]) => v !== null && v !== undefined && v !== '')
@@ -2601,14 +2731,13 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 		if (this.plugin.settings.authMode === 'api') {
 			new obsidian.Setting(containerEl)
 				.setName('Granola API key')
-				.setDesc('Create a personal API key in Granola (Settings > API). A personal key can access your own notes; a workspace key only sees workspace-public notes. Stored unencrypted in this vault\'s plugin settings.')
+				.setDesc('Create a personal API key in Granola (Settings > API). A personal key can access your own notes; a workspace key only sees workspace-public notes. On macOS the key is stored in the Keychain; on Windows/Linux it is stored unencrypted in this vault\'s plugin settings.')
 				.addText(text => {
-					text.setPlaceholder('grn_...');
+					text.setPlaceholder(this.plugin.settings.apiKeyStoredInKeychain ? 'Stored in macOS Keychain' : 'grn_...');
 					text.inputEl.type = 'password';
 					text.setValue(this.plugin.settings.granolaApiKey);
 					text.onChange(async (value) => {
-						this.plugin.settings.granolaApiKey = value.trim();
-						await this.plugin.saveSettings();
+						await this.plugin.setApiKey(value);
 					});
 				});
 
