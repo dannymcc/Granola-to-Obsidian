@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.12.1] - 2026-07-21
+
+### Changed
+- **🔐 API key now stored in the macOS Keychain instead of plaintext data.json**: `data.json` lives inside the vault, so a plaintext key travels with vault sync and backups. On macOS the key is now written to a Keychain item (`granola-sync-plus` / `granola-api-key`) via the `security` CLI the plugin already uses, and only a flag is persisted in settings. Existing plaintext keys are migrated automatically on plugin load and scrubbed from `data.json`. If the Keychain write fails, the plugin falls back to plaintext storage rather than losing the key. Windows keeps plaintext storage (noted in the setting description).
+
+## [1.12.0] - 2026-07-21
+
+### Added
+- **🔑 Official Granola API support**: New "Official API key" authentication method using the official Granola API (https://docs.granola.ai). Granola 7.427+ moved its local encryption key into a Keychain item only Granola's own signed app can read, closing off the local-token path entirely ([#66](https://github.com/dannymcc/Granola-to-Obsidian/issues/66)). API mode restores sync for users on Granola Business/Enterprise plans, who can create an API key in Granola. Local-app auth remains the default; nothing changes for existing setups.
+  - Syncs the AI summary (`summary_markdown`, used directly - no ProseMirror conversion), attendees, folder membership, calendar event data, canonical `web_url`, and (optionally) the transcript, which the API returns inline with the note detail.
+  - Incremental sync: after the first full sync, only notes updated since the last sync are fetched (`updated_after`), keeping auto-sync fast despite per-note detail requests. A "Reset API sync state" button forces a full re-fetch.
+  - Rate-limit aware: detail fetches are throttled to ~4 req/s (under the API's 5 req/s sustained limit) and 429 responses are retried with backoff.
+  - Transcript speaker names from the API (identified names or diarization labels) are shown as-is; local-mode "Me"/"Them" labels are unchanged.
+
+### Limitations of API mode (upstream API constraints)
+- Typed "My Notes" are not exposed by the official API; only the AI summary and transcript are available. The "Include My Notes" setting has no effect in API mode.
+- Notes without a generated AI summary are not returned by the API at all.
+- Personal API keys see your own notes; workspace keys only see workspace-public notes. Use a personal key.
+- The API has no folder-listing endpoint; folder tags and folder-based paths are built from each synced note's `folder_membership`, so the folder filter list in settings only shows folders seen in previously synced notes.
+
 ## [1.11.1] - 2026-05-22
 
 ### Fixed

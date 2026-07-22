@@ -92,6 +92,59 @@ function readGranolaKeychainPasswordMac() {
 	}
 }
 
+// macOS Keychain storage for the plugin's own Granola API key, so it never
+// sits in plaintext in data.json (which lives inside the vault and travels
+// with vault sync/backups). Items created via /usr/bin/security are readable
+// back by the same binary without a Keychain prompt.
+const API_KEY_KEYCHAIN_SERVICE = 'granola-sync-plus';
+const API_KEY_KEYCHAIN_ACCOUNT = 'granola-api-key';
+
+function storeApiKeyInKeychainMac(apiKey) {
+	try {
+		const { execFileSync } = require('child_process');
+		// -U updates the item in place if it already exists. The key appears
+		// in the security process's argv for the duration of the call; that
+		// is the standard tradeoff of the security CLI (no shell involved).
+		execFileSync(
+			'/usr/bin/security',
+			['add-generic-password', '-U', '-s', API_KEY_KEYCHAIN_SERVICE, '-a', API_KEY_KEYCHAIN_ACCOUNT, '-w', apiKey],
+			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+		);
+		return true;
+	} catch (e) {
+		console.error('Could not store Granola API key in macOS Keychain:', e.message || e);
+		return false;
+	}
+}
+
+function readApiKeyFromKeychainMac() {
+	try {
+		const { execFileSync } = require('child_process');
+		const out = execFileSync(
+			'/usr/bin/security',
+			['find-generic-password', '-s', API_KEY_KEYCHAIN_SERVICE, '-a', API_KEY_KEYCHAIN_ACCOUNT, '-w'],
+			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+		);
+		return out.replace(/\n$/, '');
+	} catch (e) {
+		console.warn('Could not read Granola API key from macOS Keychain:', e.message || e);
+		return null;
+	}
+}
+
+function deleteApiKeyFromKeychainMac() {
+	try {
+		const { execFileSync } = require('child_process');
+		execFileSync(
+			'/usr/bin/security',
+			['delete-generic-password', '-s', API_KEY_KEYCHAIN_SERVICE, '-a', API_KEY_KEYCHAIN_ACCOUNT],
+			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+		);
+	} catch (e) {
+		// Item may simply not exist; nothing to do
+	}
+}
+
 // Decrypt a Chromium os_crypt v10 payload (Electron safeStorage on macOS).
 // Format: 3-byte 'v10' prefix, then AES-128-CBC ciphertext. Key is derived
 // from the Keychain master password via PBKDF2-HMAC-SHA1 (salt 'saltysalt',
@@ -179,6 +232,10 @@ function readEncryptedCredentialsTokenMac(filePath) {
 const DEFAULT_SETTINGS = {
 	syncDirectory: 'Granola',
 	notePrefix: '',
+	authMode: 'local', // 'local' - read token from the Granola desktop app, 'api' - official Granola API key
+	granolaApiKey: '', // Official API key (grn_...), Business/Enterprise plans only; empty on macOS where the key lives in the Keychain
+	apiKeyStoredInKeychain: false, // macOS: key is stored in the Keychain instead of data.json
+	lastApiSync: '', // ISO timestamp of the last successful API-mode sync, used for incremental fetching
 	authKeyPath: getDefaultAuthPath(),
 	filenameTemplate: '{title}',
 	dateFormat: 'YYYY-MM-DD',
@@ -235,6 +292,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 		} catch (error) {
 			// Could not load settings, using defaults
+		}
+
+		try {
+			await this.migrateApiKeyToKeychain();
+		} catch (error) {
+			console.error('Granola Sync: API key Keychain migration failed:', error);
 		}
 
 		this.statusBarItem = this.addStatusBarItem();
@@ -364,10 +427,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			case "microphone":
 				return "Me";
 			case "system":
-			default:
 				return "Them";
+			default:
+				// Official-API transcripts carry identified speaker names or
+				// diarization labels; pass those through as-is
+				return source || "Them";
 		}
-	}	
+	}
 
 	// Helper function to format timestamp for display
 	formatTimestamp(timestamp) {
@@ -434,13 +500,28 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			
 			await this.ensureDirectoryExists();
 
-			const token = await this.loadCredentials();
-			if (!token) {
-				this.updateStatusBar('Error', 'credentials failed');
-				return;
-			}
+			const apiMode = this.isApiMode();
+			let token = null;
+			let documents = null;
 
-			const documents = await this.fetchGranolaDocuments(token);
+			if (apiMode) {
+				try {
+					documents = await this.fetchNotesViaApi();
+				} catch (error) {
+					console.error('Granola API sync failed:', error);
+					new obsidian.Notice('Granola Sync: ' + (error.message || 'API request failed'));
+					this.updateStatusBar('Error', 'API auth failed');
+					return;
+				}
+			} else {
+				token = await this.loadCredentials();
+				if (!token) {
+					this.updateStatusBar('Error', 'credentials failed');
+					return;
+				}
+
+				documents = await this.fetchGranolaDocuments(token);
+			}
 			if (!documents) {
 				this.updateStatusBar('Error', 'fetch failed');
 				return;
@@ -448,7 +529,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 			// Fetch folders if folder support or folder filtering is enabled
 			let folders = null;
-			if (this.settings.enableGranolaFolders || this.settings.enableFolderFilter) {
+			if (apiMode && (this.settings.enableGranolaFolders || this.settings.enableFolderFilter)) {
+				// The official API has no folder-listing endpoint, but each note
+				// carries its folder_membership - build the same maps from those
+				this.documentToFolderMap = {};
+				this.folderIdMap = {};
+				for (const doc of documents) {
+					for (const folder of (doc._apiFolders || [])) {
+						this.folderIdMap[folder.id] = folder;
+						if (!this.documentToFolderMap[doc.id]) {
+							this.documentToFolderMap[doc.id] = folder;
+						}
+					}
+				}
+				this.availableGranolaFolders = Object.values(this.folderIdMap);
+			} else if (this.settings.enableGranolaFolders || this.settings.enableFolderFilter) {
 				folders = await this.fetchGranolaFolders(token);
 				if (folders) {
 					// Create a mapping of document ID to folder for quick lookup
@@ -489,8 +584,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			for (let i = 0; i < documentsToSync.length; i++) {
 				const doc = documentsToSync[i];
 				try {
-					// Fetch transcript if enabled
-					if (this.settings.includeFullTranscript) {
+					// Fetch transcript if enabled (in API mode the transcript is
+					// already included in the note detail and set by adaptApiNote)
+					if (this.settings.includeFullTranscript && !apiMode) {
 						const transcriptData = await this.fetchTranscript(token, doc.id);
 						doc.transcript = this.transcriptToMarkdown(transcriptData);
 					}
@@ -696,6 +792,249 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			console.error('Error fetching documents:', error);
 			return null;
 		}
+	}
+
+	isApiMode() {
+		return this.settings.authMode === 'api' &&
+			(this.settings.apiKeyStoredInKeychain || !!(this.settings.granolaApiKey || '').trim());
+	}
+
+	/**
+	 * Returns the Granola API key from its storage backend: macOS Keychain
+	 * when apiKeyStoredInKeychain is set, plaintext settings otherwise.
+	 * Cached in memory so a sync's many requests don't each spawn a
+	 * security(1) process.
+	 */
+	getApiKey() {
+		if (this._apiKeyCache) {
+			return this._apiKeyCache;
+		}
+		let key = null;
+		if (this.settings.apiKeyStoredInKeychain && obsidian.Platform.isMacOS) {
+			key = readApiKeyFromKeychainMac();
+		} else {
+			key = (this.settings.granolaApiKey || '').trim() || null;
+		}
+		this._apiKeyCache = key;
+		return key;
+	}
+
+	/**
+	 * Stores the Granola API key. On macOS the key goes into the Keychain and
+	 * only a flag is persisted in data.json; elsewhere it is stored in
+	 * settings as before. An empty value clears both backends.
+	 */
+	async setApiKey(value) {
+		const key = (value || '').trim();
+		this._apiKeyCache = null;
+
+		if (obsidian.Platform.isMacOS) {
+			if (!key) {
+				deleteApiKeyFromKeychainMac();
+				this.settings.apiKeyStoredInKeychain = false;
+				this.settings.granolaApiKey = '';
+			} else if (storeApiKeyInKeychainMac(key)) {
+				this.settings.apiKeyStoredInKeychain = true;
+				this.settings.granolaApiKey = '';
+			} else {
+				// Keychain write failed; fall back to plaintext so the user
+				// isn't silently left without a working key
+				this.settings.apiKeyStoredInKeychain = false;
+				this.settings.granolaApiKey = key;
+			}
+		} else {
+			this.settings.apiKeyStoredInKeychain = false;
+			this.settings.granolaApiKey = key;
+		}
+
+		await this.saveSettings();
+	}
+
+	/**
+	 * One-time migration: if a plaintext key is sitting in data.json on
+	 * macOS (written by an older version or by hand), move it into the
+	 * Keychain and scrub it from disk.
+	 */
+	async migrateApiKeyToKeychain() {
+		if (!obsidian.Platform.isMacOS) return;
+		const plaintextKey = (this.settings.granolaApiKey || '').trim();
+		if (!plaintextKey) return;
+		await this.setApiKey(plaintextKey);
+		if (this.settings.apiKeyStoredInKeychain) {
+			console.log('Granola Sync: migrated API key from data.json to the macOS Keychain');
+		}
+	}
+
+	/**
+	 * GET request against the official Granola API (https://docs.granola.ai).
+	 * Handles 429 rate limiting with backoff. Throws on auth failure so the
+	 * sync loop can surface a clear error; returns null on other failures.
+	 */
+	async apiRequest(endpoint, params = {}) {
+		const apiKey = this.getApiKey();
+		if (!apiKey) {
+			throw new Error('Could not read the Granola API key' + (this.settings.apiKeyStoredInKeychain ? ' from the macOS Keychain.' : '. Set one in the plugin settings.'));
+		}
+		let url = 'https://public-api.granola.ai' + endpoint;
+		const query = Object.entries(params)
+			.filter(([, v]) => v !== null && v !== undefined && v !== '')
+			.map(([k, v]) => k + '=' + encodeURIComponent(v))
+			.join('&');
+		if (query) url += '?' + query;
+
+		for (let attempt = 0; attempt < 4; attempt++) {
+			const response = await obsidian.requestUrl({
+				url: url,
+				method: 'GET',
+				headers: {
+					'Authorization': 'Bearer ' + apiKey,
+					'Accept': 'application/json'
+				},
+				throw: false
+			});
+
+			if (response.status === 429) {
+				// Burst limit is 25 requests per 5s window; back off and retry
+				await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+				continue;
+			}
+			if (response.status === 401 || response.status === 403) {
+				throw new Error('Granola API authentication failed (' + response.status + '). Check that your API key is valid and has access to your notes.');
+			}
+			if (response.status >= 400) {
+				console.error('Granola API error ' + response.status + ' for ' + endpoint);
+				return null;
+			}
+			return response.json;
+		}
+
+		console.error('Granola API rate limit retries exhausted for ' + endpoint);
+		return null;
+	}
+
+	/**
+	 * Fetches notes via the official Granola API (API-key auth mode).
+	 * Lists note summaries (incrementally via updated_after after the first
+	 * sync), then fetches each note's detail, throttled to stay under the
+	 * 5 req/s sustained rate limit. Returns documents adapted to the same
+	 * shape processDocument() expects, or null on failure.
+	 */
+	async fetchNotesViaApi() {
+		const syncStartedAt = Date.now();
+		const maxDocuments = this.settings.syncAllHistoricalNotes
+			? Number.MAX_SAFE_INTEGER
+			: this.settings.documentSyncLimit;
+
+		// List note summaries (id, title, timestamps only)
+		const summaries = [];
+		let cursor = null;
+		while (summaries.length < maxDocuments) {
+			const params = { page_size: 30 };
+			if (cursor) params.cursor = cursor;
+			if (this.settings.lastApiSync) params.updated_after = this.settings.lastApiSync;
+
+			const data = await this.apiRequest('/v1/notes', params);
+			if (!data || !Array.isArray(data.notes)) {
+				if (summaries.length === 0) {
+					console.error('Granola API list response format is unexpected');
+					return null;
+				}
+				break;
+			}
+
+			summaries.push(...data.notes);
+			if (!data.hasMore || !data.cursor) break;
+			cursor = data.cursor;
+
+			if (summaries.length > 100) {
+				this.updateStatusBar('Syncing', summaries.length + ' notes listed');
+			}
+		}
+		if (summaries.length > maxDocuments) {
+			summaries.length = maxDocuments;
+		}
+
+		// Fetch full detail per note, throttled to ~4 req/s
+		const docs = [];
+		for (let i = 0; i < summaries.length; i++) {
+			const params = {};
+			if (this.settings.includeFullTranscript) params.include = 'transcript';
+
+			const note = await this.apiRequest('/v1/notes/' + summaries[i].id, params);
+			if (note) {
+				docs.push(this.adaptApiNote(note));
+			}
+
+			if (summaries.length > 5) {
+				this.updateStatusBar('Syncing', (i + 1) + '/' + summaries.length + ' notes fetched');
+			}
+			if (i < summaries.length - 1) {
+				await new Promise(resolve => setTimeout(resolve, 250));
+			}
+		}
+
+		// Record the sync point for incremental fetching, with a 5 minute
+		// overlap buffer to absorb clock skew. Re-fetched notes are cheap:
+		// duplicate detection by granola_id handles them.
+		this.settings.lastApiSync = new Date(syncStartedAt - 5 * 60 * 1000).toISOString();
+		await this.saveData(this.settings);
+
+		console.log('Fetched ' + docs.length + ' documents from the Granola API');
+		return docs;
+	}
+
+	/**
+	 * Adapts an official-API note object to the internal document shape that
+	 * processDocument() and its helpers expect. The API returns the AI summary
+	 * as ready markdown (summary_markdown); typed "My Notes" are not available
+	 * via the official API.
+	 */
+	adaptApiNote(note) {
+		const doc = {
+			id: note.id,
+			title: note.title,
+			created_at: note.created_at,
+			updated_at: note.updated_at,
+			summary_markdown: note.summary_markdown || note.summary_text || '',
+			web_url: note.web_url,
+			people: []
+		};
+
+		if (Array.isArray(note.attendees)) {
+			doc.people = note.attendees.map(a => ({ name: a.name, email: a.email }));
+		}
+
+		if (note.calendar_event && Array.isArray(note.calendar_event.invitees)) {
+			doc.google_calendar_event = {
+				attendees: note.calendar_event.invitees.map(invitee => {
+					if (typeof invitee === 'string') return { email: invitee };
+					return { email: invitee.email, displayName: invitee.name || invitee.displayName };
+				})
+			};
+		}
+
+		if (Array.isArray(note.folder_membership)) {
+			// Mirror the internal folder shape (title + parent_document_list_id)
+			// so folder tags, filtering, and folder-based paths work unchanged
+			doc._apiFolders = note.folder_membership.map(f => ({
+				id: f.id,
+				title: f.name,
+				parent_document_list_id: f.parent_folder_id
+			}));
+		}
+
+		if (Array.isArray(note.transcript)) {
+			doc.transcript = this.transcriptToMarkdown(note.transcript.map(entry => {
+				const speaker = entry.speaker || {};
+				return {
+					source: speaker.name || (speaker.source === 'microphone' ? 'microphone' : (speaker.diarization_label || 'system')),
+					text: entry.text,
+					start_timestamp: entry.start_time
+				};
+			}));
+		}
+
+		return doc;
 	}
 
 	async fetchGranolaFolders(token) {
@@ -1289,6 +1628,25 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	/**
+	 * Returns the enhanced notes (AI summary) as markdown, from either source:
+	 * official-API documents carry ready-made markdown in summary_markdown,
+	 * local-app documents carry ProseMirror panels that need conversion.
+	 * @param {Object} doc - The document object
+	 * @returns {string} Markdown, or '' if no enhanced notes are available
+	 */
+	getEnhancedNotesMarkdown(doc) {
+		if (typeof doc.summary_markdown === 'string' && doc.summary_markdown.trim()) {
+			return doc.summary_markdown.trim();
+		}
+		const content = this.extractPanelContent(doc, 'enhanced_notes');
+		if (!content) {
+			return '';
+		}
+		const markdown = this.convertProseMirrorToMarkdown(content);
+		return markdown ? markdown.trim() : '';
+	}
+
+	/**
 	 * Builds the note content from available sections.
 	 * Includes My Notes, Enhanced Notes, and Transcript based on settings and availability.
 	 * @param {Object} doc - The document object
@@ -1312,16 +1670,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		// Extract Enhanced Notes content
-		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
-		if (enhancedNotesContent && this.settings.includeEnhancedNotes) {
-			const enhancedNotesMarkdown = this.convertProseMirrorToMarkdown(enhancedNotesContent);
-			if (enhancedNotesMarkdown && enhancedNotesMarkdown.trim()) {
+		if (this.settings.includeEnhancedNotes) {
+			const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
+			if (enhancedNotesMarkdown) {
 				// If we have My Notes, add Enhanced Notes as a separate section
 				if (myNotesContent && this.settings.includeMyNotes) {
-					sections.push('\n## Enhanced Notes\n\n' + enhancedNotesMarkdown.trim());
+					sections.push('\n## Enhanced Notes\n\n' + enhancedNotesMarkdown);
 				} else {
 					// If no My Notes, just add the enhanced notes content directly
-					sections.push('\n' + enhancedNotesMarkdown.trim());
+					sections.push('\n' + enhancedNotesMarkdown);
 				}
 			}
 		}
@@ -1352,12 +1709,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		// Extract all available content
 		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
-		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
 		const hasTranscript = this.settings.includeFullTranscript && transcript && transcript !== 'no_transcript';
 
 		// Check if there's any content to process
 		const hasMyNotes = myNotesContent && this.settings.includeMyNotes;
-		const hasEnhancedNotes = enhancedNotesContent && this.settings.includeEnhancedNotes;
+		const hasEnhancedNotes = this.settings.includeEnhancedNotes && !!this.getEnhancedNotesMarkdown(doc);
 
 		// If no content is available at all, skip this document
 		if (!hasMyNotes && !hasEnhancedNotes && !hasTranscript) {
@@ -1395,7 +1751,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const folderTags = this.generateFolderTags(folderNames);
 
 				// Generate Granola URL
-				const granolaUrl = this.generateGranolaUrl(docId);
+				const granolaUrl = this.generateGranolaUrl(doc);
 
 				// Combine all tags
 				const allTags = [...attendeeTags, ...folderTags];
@@ -1425,7 +1781,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const folderTags = this.generateFolderTags(folderNames);
 
 		// Generate Granola URL
-		const granolaUrl = this.generateGranolaUrl(docId);
+		const granolaUrl = this.generateGranolaUrl(doc);
 
 		// Combine all tags
 		const allTags = [...attendeeTags, ...folderTags];
@@ -1976,14 +2332,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	generateGranolaUrl(docId) {
-		if (!this.settings.includeGranolaUrl || !docId) {
+	generateGranolaUrl(doc) {
+		if (!this.settings.includeGranolaUrl || !doc || !doc.id) {
 			return null;
 		}
-		
+
 		try {
+			// Official-API documents carry their canonical web URL
+			if (doc.web_url) {
+				return doc.web_url;
+			}
 			// Construct the Granola notes URL using the correct format
-			return `https://notes.granola.ai/d/${docId}`;
+			return `https://notes.granola.ai/d/${doc.id}`;
 		} catch (error) {
 			console.error('Error generating Granola URL:', error);
 			return null;
@@ -2156,7 +2516,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const attendeeTags = this.generateAttendeeTags(attendeeNames);
 			const folderNames = this.extractFolderNames(doc);
 			const folderTags = this.generateFolderTags(folderNames);
-			const granolaUrl = this.generateGranolaUrl(doc.id);
+			const granolaUrl = this.generateGranolaUrl(doc);
 
 			const attendeeBacklinks = this.generateAttendeeBacklinks(attendeeNames);
 
@@ -2358,17 +2718,59 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				});
 			});
 
+		containerEl.createEl('h3', {text: 'Authentication'});
+
 		new obsidian.Setting(containerEl)
-			.setName('Auth key path')
-			.setDesc('Path to your Granola authentication key file')
-			.addText(text => {
-				text.setPlaceholder(getDefaultAuthPath());
-				text.setValue(this.plugin.settings.authKeyPath);
-				text.onChange(async (value) => {
-					this.plugin.settings.authKeyPath = value;
+			.setName('Authentication method')
+			.setDesc('"Local Granola app" reads the token from the Granola desktop app (broken since Granola 7.427 moved its encryption key into the Keychain). "Official API key" uses the Granola API - requires a Business or Enterprise plan, and syncs the AI summary and transcript only (typed "My Notes" are not available via the API).')
+			.addDropdown(dropdown => {
+				dropdown.addOption('local', 'Local Granola app');
+				dropdown.addOption('api', 'Official API key');
+				dropdown.setValue(this.plugin.settings.authMode);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.authMode = value;
 					await this.plugin.saveSettings();
+					this.display();
 				});
 			});
+
+		if (this.plugin.settings.authMode === 'api') {
+			new obsidian.Setting(containerEl)
+				.setName('Granola API key')
+				.setDesc('Create a personal API key in Granola (Settings > API). A personal key can access your own notes; a workspace key only sees workspace-public notes. On macOS the key is stored in the Keychain; on Windows it is stored unencrypted in this vault\'s plugin settings.')
+				.addText(text => {
+					text.setPlaceholder(this.plugin.settings.apiKeyStoredInKeychain ? 'Stored in macOS Keychain' : 'grn_...');
+					text.inputEl.type = 'password';
+					text.setValue(this.plugin.settings.granolaApiKey);
+					text.onChange(async (value) => {
+						await this.plugin.setApiKey(value);
+					});
+				});
+
+			new obsidian.Setting(containerEl)
+				.setName('Reset API sync state')
+				.setDesc('API-mode syncs are incremental: only notes updated since the last sync are fetched. Reset to re-fetch everything on the next sync (up to the document sync limit).')
+				.addButton(button => {
+					button.setButtonText('Reset');
+					button.onClick(async () => {
+						this.plugin.settings.lastApiSync = '';
+						await this.plugin.saveSettings();
+						new obsidian.Notice('Granola Sync: sync state reset. The next sync will re-fetch notes.');
+					});
+				});
+		} else {
+			new obsidian.Setting(containerEl)
+				.setName('Auth key path')
+				.setDesc('Path to your Granola authentication key file')
+				.addText(text => {
+					text.setPlaceholder(getDefaultAuthPath());
+					text.setValue(this.plugin.settings.authKeyPath);
+					text.onChange(async (value) => {
+						this.plugin.settings.authKeyPath = value;
+						await this.plugin.saveSettings();
+					});
+				});
+		}
 
 		new obsidian.Setting(containerEl)
 			.setName('Date format')
@@ -2388,7 +2790,7 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 
 		new obsidian.Setting(containerEl)
 			.setName('Include My Notes')
-			.setDesc('Include your personal notes from Granola in a "## My Notes" section. These are the notes you write yourself during meetings.')
+			.setDesc('Include your personal notes from Granola in a "## My Notes" section. These are the notes you write yourself during meetings. Not available in official API mode - the API only returns the AI summary and transcript.')
 			.addToggle(toggle => {
 				toggle.setValue(this.plugin.settings.includeMyNotes);
 				toggle.onChange(async (value) => {
