@@ -2731,7 +2731,7 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 		if (this.plugin.settings.authMode === 'api') {
 			new obsidian.Setting(containerEl)
 				.setName('Granola API key')
-				.setDesc('Create a personal API key in Granola (Settings > API). A personal key can access your own notes; a workspace key only sees workspace-public notes. On macOS the key is stored in the Keychain; on Windows/Linux it is stored unencrypted in this vault\'s plugin settings.')
+				.setDesc('Create a personal API key in Granola (Settings > API). A personal key can access your own notes; a workspace key only sees workspace-public notes. On macOS the key is stored in the Keychain; on Windows it is stored unencrypted in this vault\'s plugin settings.')
 				.addText(text => {
 					text.setPlaceholder(this.plugin.settings.apiKeyStoredInKeychain ? 'Stored in macOS Keychain' : 'grn_...');
 					text.inputEl.type = 'password';
