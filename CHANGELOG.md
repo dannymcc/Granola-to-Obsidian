@@ -2,12 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.12.1] - 2026-07-21
-
-### Changed
-- **🔐 API key now stored in the macOS Keychain instead of plaintext data.json**: `data.json` lives inside the vault, so a plaintext key travels with vault sync and backups. On macOS the key is now written to a Keychain item (`granola-sync-plus` / `granola-api-key`) via the `security` CLI the plugin already uses, and only a flag is persisted in settings. Existing plaintext keys are migrated automatically on plugin load and scrubbed from `data.json`. If the Keychain write fails, the plugin falls back to plaintext storage rather than losing the key. Windows keeps plaintext storage (noted in the setting description).
-
-## [1.12.0] - 2026-07-21
+## [1.12.0] - 2026-07-22
 
 ### Added
 - **🔑 Official Granola API support**: New "Official API key" authentication method using the official Granola API (https://docs.granola.ai). Granola 7.427+ moved its local encryption key into a Keychain item only Granola's own signed app can read, closing off the local-token path entirely ([#66](https://github.com/dannymcc/Granola-to-Obsidian/issues/66)). API mode restores sync for users on Granola Business/Enterprise plans, who can create an API key in Granola. Local-app auth remains the default; nothing changes for existing setups.
@@ -21,6 +16,15 @@ All notable changes to this project will be documented in this file.
 - Notes without a generated AI summary are not returned by the API at all.
 - Personal API keys see your own notes; workspace keys only see workspace-public notes. Use a personal key.
 - The API has no folder-listing endpoint; folder tags and folder-based paths are built from each synced note's `folder_membership`, so the folder filter list in settings only shows folders seen in previously synced notes.
+
+### Changed
+- **🔐 API key stored in the macOS Keychain instead of plaintext data.json**: `data.json` lives inside the vault, so a plaintext key travels with vault sync and backups. On macOS the key is now written to a Keychain item (`granola-sync-plus` / `granola-api-key`) via the `security` CLI the plugin already uses, and only a flag is persisted in settings. Existing plaintext keys are migrated automatically on plugin load and scrubbed from `data.json`. If the Keychain write fails, the plugin falls back to plaintext storage rather than losing the key. Windows keeps plaintext storage (noted in the setting description).
+
+### Fixed
+- **📝 My Notes now sync for manually-created notes**: Notes created without a recording (Quick Notes, or typed-only notes) store their content in a top-level `doc.notes` field, which the extractor never inspected — the synced file ended up with an empty body. `extractPanelContent` now falls back to `doc.notes` for the `my_notes` panel type, mirroring the existing `doc.content` fallback. First spotted by [@scottxp](https://github.com/scottxp) in [#33](https://github.com/dannymcc/Granola-to-Obsidian/issues/33); fixed by [@anuvgupta](https://github.com/anuvgupta) ([#62](https://github.com/dannymcc/Granola-to-Obsidian/issues/62), [#63](https://github.com/dannymcc/Granola-to-Obsidian/pull/63)).
+
+### Credits
+- Thanks to [@shirgoldbird](https://github.com/shirgoldbird) for building the official-API auth mode ([#67](https://github.com/dannymcc/Granola-to-Obsidian/pull/67)) and verifying it end-to-end against a real Business workspace, and to [@anuvgupta](https://github.com/anuvgupta) for the My Notes fallback fix ([#63](https://github.com/dannymcc/Granola-to-Obsidian/pull/63)).
 
 ## [1.11.1] - 2026-05-22
 
