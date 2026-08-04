@@ -39,8 +39,8 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 
 This plugin reads your Granola notes from the official Granola API. You should know exactly what it does on the network and when:
 
-- **Hosts contacted**: only `api.granola.ai`. No telemetry, analytics, error reporting, or third-party services. The plugin has no other network code paths.
-- **What is sent**: standard Granola API requests using the access token from your local Granola install (the same token Granola itself uses). Nothing is sent to any other host.
+- **Hosts contacted**: `api.granola.ai` in the default **Local Granola app** auth mode, or `public-api.granola.ai` if you switch to **Official Granola API key** mode (see Configuration below). No telemetry, analytics, error reporting, or third-party services. The plugin has no other network code paths.
+- **What is sent**: standard Granola API requests using either the access token from your local Granola install, or your official API key, depending on auth mode (the same credential Granola itself uses/issues). Nothing is sent to any other host.
 - **What triggers a request**: a manual sync (ribbon icon / command palette), or — if you opt in — an **Auto-sync** timer. Auto-sync uses `setInterval` at the frequency you choose in settings, and each tick makes the same set of Granola API calls a manual sync would.
 - **Turning background activity off**: set **Settings → Granola Sync Plus → Auto-sync frequency** to **Disabled**. The interval is cleared immediately and the plugin only contacts Granola when you ask it to.
 
@@ -103,6 +103,18 @@ Path to your Granola authentication file. Default locations:
 - **Windows**: `AppData/Roaming/Granola/supabase.json`
 
 The plugin automatically detects your operating system and sets the appropriate default path.
+
+### Auth Mode: Official API Key (Business/Enterprise)
+
+Some Granola desktop releases have moved the local credentials file's encryption key into an OS-level store that third-party apps (including this plugin) can no longer read. If **Auth Mode** is set to **Local Granola app** and sync silently stops working, this is usually why — see [issue #66](https://github.com/dannymcc/Granola-to-Obsidian/issues/66).
+
+As of v1.12.0, you can switch **Settings → Granola Sync Plus → Auth Mode** to **Official Granola API key** instead:
+
+1. In the Granola desktop app, go to **Settings → Connectors → API keys** and create a key. This requires a **Business or Enterprise** Granola plan — Free/Individual plans cannot create API keys.
+2. Paste the key into **Settings → Granola Sync Plus → Granola API key**. On macOS it's stored in the system Keychain, not in plaintext in your vault.
+3. Notes without an AI-generated summary aren't returned by this API and won't sync, and there's currently no endpoint for listing folders directly (folder membership is inferred per-note instead).
+
+If sync fails in this mode, see **Troubleshooting → Official API Key Errors** below.
 
 ### Filename Template
 Customize how your notes are named using these variables:
@@ -464,6 +476,15 @@ Your converted meeting content appears here in clean Markdown format.
   - **Windows**: `C:\Users\[USERNAME]\AppData\Roaming\Granola\supabase.json`
 - If the file is in a different location, update the "Auth Key Path" in plugin settings
 - Try logging out and back in to Granola
+
+### Official API Key Errors
+
+If you're using **Auth Mode: Official Granola API key** (see above):
+
+- **"Granola API authentication failed (401/403)"**: the key itself was rejected by Granola's server. Check that the key hasn't been revoked, that your account is on a Business/Enterprise plan, and that you copied the whole key with no extra whitespace.
+- **"net::ERR_FAILED" or "Granola API request failed: ... firewall, VPN, or security/EDR software..."**: this means the request never reached Granola's server at all — Obsidian's network stack was blocked or failed before getting an HTTP response, which is a different problem from an invalid key. As of the version that added this message, the plugin automatically retries once through a different network path (Node's `https` module) before giving up, which resolves this on some machines. If it still fails:
+  - Confirm plain connectivity works outside Obsidian: `curl -v https://public-api.granola.ai/v1/notes` from a terminal. If that also fails/hangs, it's a network-level block (VPN, proxy, DNS) unrelated to this plugin.
+  - If `curl` succeeds but Obsidian still fails, something is specifically filtering Obsidian's Electron process (common with corporate EDR/security software that filters by originating application) — check for security software (e.g. CrowdStrike, SentinelOne, Netskope, Jamf Protect) and ask your IT team to allowlist `public-api.granola.ai` for Obsidian, including its helper processes, not just the main app.
 
 ### File Naming Issues
 - Use the preview buttons to test your templates

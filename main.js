@@ -229,6 +229,38 @@ function readEncryptedCredentialsTokenMac(filePath) {
 	}
 }
 
+// Some networks let a plain `curl`/Node process reach the Granola API while
+// Electron's own network stack (obsidian.requestUrl -> Chromium's net
+// module) can't - e.g. security software that filters by originating
+// process, or an HTTP/2 negotiation quirk against Granola's load balancer.
+// In that case requestUrl() rejects with a bare "net::ERR_FAILED" instead of
+// returning a response, before any status code is available. This fallback
+// re-issues the same GET through Node's own https module (a different
+// network stack from Chromium's), so sync can still succeed on machines
+// where requestUrl's transport is the specific thing being blocked.
+function requestJsonViaNodeHttps(url, headers) {
+	return new Promise((resolve, reject) => {
+		const https = require('https');
+		const req = https.request(url, { method: 'GET', headers }, (res) => {
+			const chunks = [];
+			res.on('data', (chunk) => chunks.push(chunk));
+			res.on('end', () => {
+				const body = Buffer.concat(chunks).toString('utf8');
+				let json = null;
+				try {
+					json = body ? JSON.parse(body) : null;
+				} catch (e) {
+					// Non-JSON body (e.g. an HTML error page) - leave json as null,
+					// callers only need it for the >= 400 status branches below.
+				}
+				resolve({ status: res.statusCode, json });
+			});
+		});
+		req.on('error', reject);
+		req.end();
+	});
+}
+
 const DEFAULT_SETTINGS = {
 	syncDirectory: 'Granola',
 	notePrefix: '',
@@ -867,8 +899,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	/**
 	 * GET request against the official Granola API (https://docs.granola.ai).
-	 * Handles 429 rate limiting with backoff. Throws on auth failure so the
-	 * sync loop can surface a clear error; returns null on other failures.
+	 * Handles 429 rate limiting with backoff. Falls back to Node's https
+	 * module if requestUrl fails at the network level (see
+	 * requestJsonViaNodeHttps() above). Throws on auth failure so the sync
+	 * loop can surface a clear error; returns null on other failures.
 	 */
 	async apiRequest(endpoint, params = {}) {
 		const apiKey = this.getApiKey();
@@ -882,16 +916,35 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			.join('&');
 		if (query) url += '?' + query;
 
+		const headers = {
+			'Authorization': 'Bearer ' + apiKey,
+			'Accept': 'application/json'
+		};
+
 		for (let attempt = 0; attempt < 4; attempt++) {
-			const response = await obsidian.requestUrl({
-				url: url,
-				method: 'GET',
-				headers: {
-					'Authorization': 'Bearer ' + apiKey,
-					'Accept': 'application/json'
-				},
-				throw: false
-			});
+			let response;
+			try {
+				response = await obsidian.requestUrl({
+					url: url,
+					method: 'GET',
+					headers: headers,
+					throw: false
+				});
+			} catch (networkError) {
+				// requestUrl rejected before producing a response (e.g. a raw
+				// "net::ERR_FAILED") - retry once via Node's https module, which
+				// uses a different network stack and can succeed where Electron's
+				// own request failed. See requestJsonViaNodeHttps() above.
+				try {
+					response = await requestJsonViaNodeHttps(url, headers);
+				} catch (fallbackError) {
+					throw new Error('Granola API request failed: ' + (networkError.message || networkError) +
+						'. This usually means something on your network or machine (a firewall, VPN, or ' +
+						'security/EDR software) is blocking Obsidian from reaching public-api.granola.ai - ' +
+						'try the request from a terminal (curl -v https://public-api.granola.ai/v1/notes) to ' +
+						'confirm connectivity outside Obsidian.');
+				}
+			}
 
 			if (response.status === 429) {
 				// Burst limit is 25 requests per 5s window; back off and retry
@@ -899,7 +952,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				continue;
 			}
 			if (response.status === 401 || response.status === 403) {
-				throw new Error('Granola API authentication failed (' + response.status + '). Check that your API key is valid and has access to your notes.');
+				// Granola's API returns a structured { code, message } body on auth
+				// failures (e.g. MISSING_API_KEY, INVALID_API_KEY) - surface it
+				// instead of only the status code, since it distinguishes "no key
+				// sent" / "malformed key" / "revoked key" / "wrong plan" cases that
+				// otherwise all look identical to the user.
+				const detail = response.json && response.json.message;
+				throw new Error('Granola API authentication failed (' + response.status + ')' +
+					(detail ? ': ' + detail : '. Check that your API key is valid and has access to your notes.'));
 			}
 			if (response.status >= 400) {
 				console.error('Granola API error ' + response.status + ' for ' + endpoint);
