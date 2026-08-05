@@ -241,9 +241,26 @@ function readEncryptedCredentialsTokenMac(filePath) {
 function requestJsonViaNodeHttps(url, headers) {
 	return new Promise((resolve, reject) => {
 		const https = require('https');
+		let settled = false;
+		let timer = null;
+		const settle = (fn, value) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			fn(value);
+		};
 		const req = https.request(url, { method: 'GET', headers }, (res) => {
 			const chunks = [];
 			res.on('data', (chunk) => chunks.push(chunk));
+			res.on('error', (err) => settle(reject, err));
+			res.on('close', () => {
+				// The socket can close before 'end' fires (server hung up
+				// mid-response); res.complete distinguishes that from a
+				// normal close after a fully-received body.
+				if (!res.complete) {
+					settle(reject, new Error('Connection closed before the response completed'));
+				}
+			});
 			res.on('end', () => {
 				const body = Buffer.concat(chunks).toString('utf8');
 				let json = null;
@@ -253,10 +270,15 @@ function requestJsonViaNodeHttps(url, headers) {
 					// Non-JSON body (e.g. an HTML error page) - leave json as null,
 					// callers only need it for the >= 400 status branches below.
 				}
-				resolve({ status: res.statusCode, json });
+				settle(resolve, { status: res.statusCode, json });
 			});
 		});
-		req.on('error', reject);
+		timer = setTimeout(() => {
+			// Destroying with an error makes req emit 'error', which settles
+			// the promise via the guard above.
+			req.destroy(new Error('Granola API request timed out after 30s'));
+		}, 30000);
+		req.on('error', (err) => settle(reject, err));
 		req.end();
 	});
 }
