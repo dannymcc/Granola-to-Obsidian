@@ -336,6 +336,12 @@ const DEFAULT_SETTINGS = {
 	includeEnhancedNotes: true, // Include "Enhanced Notes" (AI summary) from Granola
 	selectedGranolaFolders: [], // Array of Granola folder IDs to sync (empty = sync all)
 	enableFolderFilter: false, // Enable filtering by Granola folders
+	enableFolderExclusion: false, // Skip notes that live in excluded Granola folders
+	excludedGranolaFolders: [], // Array of Granola folder IDs to never sync
+	enableDateRangeFilter: false, // Only sync notes within a date range
+	dateRangeMode: 'relative', // 'relative' - last N days, 'fixed' - on or after a given date
+	dateRangeDays: 30, // Number of days back to sync when dateRangeMode is 'relative'
+	dateRangeStart: '', // YYYY-MM-DD; sync notes created on or after this date when dateRangeMode is 'fixed'
 	enableAutoReorganize: false, // Automatically reorganize notes after sync
 	// Frontmatter customization
 	includeTitle: true, // Include title field in frontmatter
@@ -596,10 +602,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 			// Fetch folders if folder support or folder filtering is enabled
 			let folders = null;
-			if (apiMode && (this.settings.enableGranolaFolders || this.settings.enableFolderFilter)) {
+			const needsFolders = this.settings.enableGranolaFolders ||
+				this.settings.enableFolderFilter ||
+				this.settings.enableFolderExclusion;
+			if (apiMode && needsFolders) {
 				// The official API has no folder-listing endpoint, but each note
 				// carries its folder_membership - build the same maps from those
 				this.documentToFolderMap = {};
+				// A note can sit in several folders; documentToFolderMap only keeps
+				// the first (it drives the folder a note is filed under). Exclusion
+				// has to consider every folder a note belongs to, hence this second map.
+				this.documentToFoldersMap = {};
 				this.folderIdMap = {};
 				for (const doc of documents) {
 					for (const folder of (doc._apiFolders || [])) {
@@ -607,14 +620,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						if (!this.documentToFolderMap[doc.id]) {
 							this.documentToFolderMap[doc.id] = folder;
 						}
+						if (!this.documentToFoldersMap[doc.id]) {
+							this.documentToFoldersMap[doc.id] = [];
+						}
+						this.documentToFoldersMap[doc.id].push(folder);
 					}
 				}
 				this.availableGranolaFolders = Object.values(this.folderIdMap);
-			} else if (this.settings.enableGranolaFolders || this.settings.enableFolderFilter) {
+			} else if (needsFolders) {
 				folders = await this.fetchGranolaFolders(token);
 				if (folders) {
 					// Create a mapping of document ID to folder for quick lookup
 					this.documentToFolderMap = {};
+					// And a second one holding every folder a note belongs to, which
+					// folder exclusion needs (see the API-mode branch above)
+					this.documentToFoldersMap = {};
 					// Create a mapping of folder ID to folder for parent traversal
 					this.folderIdMap = {};
 					// Also store all available folders for the settings UI
@@ -624,6 +644,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						if (folder.document_ids) {
 							for (const docId of folder.document_ids) {
 								this.documentToFolderMap[docId] = folder;
+								if (!this.documentToFoldersMap[docId]) {
+									this.documentToFoldersMap[docId] = [];
+								}
+								this.documentToFoldersMap[docId].push(folder);
 							}
 						}
 					}
@@ -643,6 +667,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					return this.settings.selectedGranolaFolders.includes(folder.id);
 				});
 				console.log(`Folder filter: syncing ${documentsToSync.length} of ${documents.length} documents`);
+			}
+
+			// Drop notes that live in an excluded folder (#46). This runs after the
+			// include filter, so an excluded folder wins over a selected one.
+			if (this.settings.enableFolderExclusion && this.settings.excludedGranolaFolders.length > 0) {
+				const beforeExclusion = documentsToSync.length;
+				documentsToSync = documentsToSync.filter(doc => !this.isInExcludedFolder(doc));
+				console.log(`Folder exclusion: skipped ${beforeExclusion - documentsToSync.length} of ${beforeExclusion} documents`);
+			}
+
+			// Restrict to a date range if one is configured (#65)
+			if (this.settings.enableDateRangeFilter) {
+				const beforeDateFilter = documentsToSync.length;
+				documentsToSync = this.filterDocumentsByDateRange(documentsToSync);
+				console.log(`Date range filter: syncing ${documentsToSync.length} of ${beforeDateFilter} documents`);
 			}
 
 			let syncedCount = 0;
@@ -722,6 +761,69 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			console.error('Granola sync failed:', error);
 			this.updateStatusBar('Error', 'sync failed');
 		}
+	}
+
+	// True when any folder the note belongs to has been excluded. Notes that are
+	// not in a folder at all are never excluded - "exclude these folders" says
+	// nothing about unfiled notes, and dropping them would be a surprise.
+	isInExcludedFolder(doc) {
+		const excluded = this.settings.excludedGranolaFolders;
+		if (!excluded || excluded.length === 0) return false;
+
+		const folders = (this.documentToFoldersMap && this.documentToFoldersMap[doc.id]) ||
+			(this.documentToFolderMap && this.documentToFolderMap[doc.id] ? [this.documentToFolderMap[doc.id]] : []);
+
+		return folders.some(folder => excluded.includes(folder.id));
+	}
+
+	// Start of the configured sync window, or null when the filter is off or
+	// misconfigured (an unparseable fixed date syncs everything rather than nothing).
+	getDateRangeCutoff() {
+		if (!this.settings.enableDateRangeFilter) return null;
+
+		if (this.settings.dateRangeMode === 'fixed') {
+			const raw = (this.settings.dateRangeStart || '').trim();
+			if (!raw) return null;
+			// Parse as local midnight so "on or after 2026-03-01" means the whole
+			// of the 1st in the user's own timezone, not 00:00 UTC.
+			const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+			if (!match) {
+				console.warn('Granola Sync: ignoring date range filter, "' + raw + '" is not a YYYY-MM-DD date');
+				return null;
+			}
+			const year = Number(match[1]);
+			const month = Number(match[2]);
+			const day = Number(match[3]);
+			const cutoff = new Date(year, month - 1, day);
+			// The Date constructor rolls out-of-range parts over rather than
+			// failing (2026-13-99 becomes April 2027), so check it round-trips.
+			if (cutoff.getFullYear() !== year || cutoff.getMonth() !== month - 1 || cutoff.getDate() !== day) {
+				console.warn('Granola Sync: ignoring date range filter, "' + raw + '" is not a real date');
+				return null;
+			}
+			return cutoff;
+		}
+
+		const days = Number(this.settings.dateRangeDays);
+		if (!Number.isFinite(days) || days <= 0) return null;
+		const cutoff = new Date();
+		cutoff.setDate(cutoff.getDate() - days);
+		return cutoff;
+	}
+
+	// Keep notes created on or after the cutoff. Notes with no usable created_at
+	// are kept: there is no evidence they fall outside the window, and silently
+	// dropping them would look like the sync losing notes.
+	filterDocumentsByDateRange(documents) {
+		const cutoff = this.getDateRangeCutoff();
+		if (!cutoff) return documents;
+
+		return documents.filter(doc => {
+			if (!doc.created_at) return true;
+			const created = new Date(doc.created_at);
+			if (isNaN(created.getTime())) return true;
+			return created >= cutoff;
+		});
 	}
 
 	async loadCredentials() {
@@ -1096,7 +1198,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		};
 
 		if (Array.isArray(note.attendees)) {
-			doc.people = note.attendees.map(a => ({ name: a.name, email: a.email }));
+			// Keep `resource` so isNonPersonAttendee() can still see it downstream.
+			doc.people = note.attendees.map(a => ({ name: a.name, email: a.email, resource: a.resource }));
 		}
 
 		// The invitee list is only a fallback source of attendee names. When the
@@ -1110,7 +1213,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			doc.google_calendar_event = {
 				attendees: note.calendar_event.invitees.map(invitee => {
 					if (typeof invitee === 'string') return { email: invitee };
-					return { email: invitee.email, displayName: invitee.name || invitee.displayName };
+					return { email: invitee.email, displayName: invitee.name || invitee.displayName, resource: invitee.resource };
 				})
 			};
 		}
@@ -1870,6 +1973,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const noteContent = this.buildNoteContent(doc, transcript);
 				const finalMarkdown = frontmatter + noteContent;
 
+				// Only write when the file would actually change. Rewriting a note
+				// with identical content still counts as an edit to Obsidian Sync,
+				// which creates a new version of the file on every sync and eats
+				// vault storage for no benefit (#47).
+				if (await this.noteContentMatches(existingFile, finalMarkdown)) {
+					return true;
+				}
+
 				await this.app.vault.process(existingFile, () => finalMarkdown);
 				return true;
 			} catch (updateError) {
@@ -1925,7 +2036,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					const granolaIdMatch = frontmatterMatch[1].match(/granola_id:\s*(.+)$/m);
 					if (granolaIdMatch && granolaIdMatch[1].trim() === docId) {
 						// Same granola_id - update the existing file instead of creating duplicate
-						await this.app.vault.modify(existingFileByName, finalMarkdown);
+						if (existingContent !== finalMarkdown) {
+							await this.app.vault.modify(existingFileByName, finalMarkdown);
+						}
 						return true;
 					}
 				}
@@ -2233,7 +2346,16 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			if (doc.people && Array.isArray(doc.people)) {
 				for (const person of doc.people) {
 					let name = null;
-					
+
+					// Rooms and other bookable resources can appear here too, not
+					// just in the calendar invitee list, so apply the same filter.
+					if (isNonPersonAttendee(person)) {
+						if (person.email) {
+							processedEmails.add(person.email);
+						}
+						continue;
+					}
+
 					// Try to get name from various fields
 					if (person.name) {
 						name = person.name;
@@ -2604,6 +2726,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return frontmatter;
 	}
 
+	// True when the file on disk already holds exactly the content we were about
+	// to write, so the write can be skipped entirely (#47). Errors are reported
+	// as "does not match" so a failed read can never silently skip a real update.
+	async noteContentMatches(file, content) {
+		try {
+			return (await this.app.vault.read(file)) === content;
+		} catch (error) {
+			console.error('Error comparing existing note content:', error);
+			return false;
+		}
+	}
+
 	async isNoteOutdated(existingFile, doc) {
 		if (!doc.updated_at) return false;
 		try {
@@ -2627,6 +2761,43 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
+	// Mirror of the transformation updateExistingNoteMetadata() applies, used to
+	// decide whether the write is worth doing at all. Anything we are not certain
+	// about (no cache yet, tags stored as a bare string rather than a list)
+	// answers "yes, update" so the old behaviour still applies in odd cases.
+	frontmatterNeedsUpdate(file, attendeeTags, folderTags, attendeeBacklinks, granolaUrl) {
+		try {
+			const cache = this.app.metadataCache.getFileCache(file);
+			const frontmatter = cache && cache.frontmatter;
+			if (!frontmatter) return true;
+
+			const existingTags = frontmatter.tags === undefined ? [] : frontmatter.tags;
+			if (!Array.isArray(existingTags)) return true;
+
+			const preservedTags = existingTags.filter(
+				(tag) => !attendeeTags.includes(tag) && !folderTags.includes(tag)
+			);
+			const desiredTags = [...preservedTags, ...attendeeTags, ...folderTags];
+			if (existingTags.length !== desiredTags.length) return true;
+			if (existingTags.some((tag, i) => tag !== desiredTags[i])) return true;
+
+			if (attendeeBacklinks.length > 0) {
+				const prop = this.settings.attendeeBacklinkProperty || 'participants';
+				const existingBacklinks = frontmatter[prop];
+				if (!Array.isArray(existingBacklinks)) return true;
+				if (existingBacklinks.length !== attendeeBacklinks.length) return true;
+				if (existingBacklinks.some((link, i) => link !== attendeeBacklinks[i])) return true;
+			}
+
+			if (granolaUrl && frontmatter.granola_url !== granolaUrl) return true;
+
+			return false;
+		} catch (error) {
+			console.error('Error checking whether frontmatter needs updating:', error);
+			return true;
+		}
+	}
+
 	async updateExistingNoteMetadata(file, doc) {
 		try {
 			// Extract all metadata
@@ -2637,6 +2808,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const granolaUrl = this.generateGranolaUrl(doc);
 
 			const attendeeBacklinks = this.generateAttendeeBacklinks(attendeeNames);
+
+			// processFrontMatter always rewrites the file, even when it produces
+			// byte-identical frontmatter. With "Skip existing notes" on that means
+			// every note is touched on every sync, which is exactly the Obsidian
+			// Sync version churn reported in #47 - so work out first whether
+			// anything would actually change, and do nothing if not.
+			if (!this.frontmatterNeedsUpdate(file, attendeeTags, folderTags, attendeeBacklinks, granolaUrl)) {
+				return;
+			}
 
 			// Use FileManager.processFrontMatter for atomic frontmatter updates
 			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
@@ -2813,6 +2993,113 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 	constructor(app, plugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	// Fetches the Granola folder list used by both the include and exclude
+	// filters. In API mode there is no folder-listing endpoint - folders are
+	// derived from the notes themselves during a sync - so say so rather than
+	// firing a request that cannot work.
+	renderFolderRefreshButton(containerEl) {
+		new obsidian.Setting(containerEl)
+			.setName('Refresh folder list')
+			.setDesc('Fetch the latest list of folders from Granola')
+			.addButton(button => {
+				button.setButtonText('Refresh folders');
+				button.onClick(async () => {
+					if (this.plugin.isApiMode()) {
+						new obsidian.Notice('In API key mode, folders are read from your notes. Run a sync to populate the folder list.');
+						return;
+					}
+					try {
+						const token = await this.plugin.loadCredentials();
+						if (!token) {
+							new obsidian.Notice('Could not load credentials. Please check your auth key path.');
+							return;
+						}
+						const folders = await this.plugin.fetchGranolaFolders(token);
+						if (folders) {
+							this.plugin.availableGranolaFolders = folders;
+							new obsidian.Notice(`Found ${folders.length} folders`);
+							this.display(); // Refresh to show updated folders
+						} else {
+							new obsidian.Notice('Could not fetch folders from Granola');
+						}
+					} catch (error) {
+						console.error('Error fetching folders:', error);
+						new obsidian.Notice('Error fetching folders. Check console for details.');
+					}
+				});
+			});
+	}
+
+	// Renders a checkbox per Granola folder, bound to the array setting named by
+	// options.settingKey ('selectedGranolaFolders' or 'excludedGranolaFolders').
+	renderFolderCheckboxList(containerEl, availableFolders, options) {
+		const { name, desc, settingKey, showBulkButtons } = options;
+
+		const folderSelectionEl = containerEl.createEl('div', { cls: 'setting-item' });
+		const folderInfoEl = folderSelectionEl.createEl('div', { cls: 'setting-item-info' });
+		const folderNameEl = folderInfoEl.createEl('div', { cls: 'setting-item-name' });
+		folderNameEl.setText(name);
+		const folderDescEl = folderInfoEl.createEl('div', { cls: 'setting-item-description' });
+		folderDescEl.setText(desc);
+
+		const folderListEl = containerEl.createEl('div', { cls: 'granola-folder-list' });
+		folderListEl.style.marginLeft = '20px';
+		folderListEl.style.marginBottom = '20px';
+
+		for (const folder of availableFolders) {
+			const folderItemEl = folderListEl.createEl('div', { cls: 'granola-folder-item' });
+			folderItemEl.style.display = 'flex';
+			folderItemEl.style.alignItems = 'center';
+			folderItemEl.style.marginBottom = '8px';
+
+			const checkbox = folderItemEl.createEl('input', { type: 'checkbox' });
+			checkbox.checked = this.plugin.settings[settingKey].includes(folder.id);
+			checkbox.style.marginRight = '8px';
+
+			const label = folderItemEl.createEl('label');
+			label.setText(folder.title + (folder.document_ids ? ` (${folder.document_ids.length} notes)` : ''));
+			label.style.cursor = 'pointer';
+
+			checkbox.addEventListener('change', async () => {
+				if (checkbox.checked) {
+					if (!this.plugin.settings[settingKey].includes(folder.id)) {
+						this.plugin.settings[settingKey].push(folder.id);
+					}
+				} else {
+					this.plugin.settings[settingKey] = this.plugin.settings[settingKey].filter(id => id !== folder.id);
+				}
+				await this.plugin.saveSettings();
+			});
+
+			label.addEventListener('click', () => {
+				checkbox.click();
+			});
+		}
+
+		if (!showBulkButtons) return;
+
+		// Add "Select All" / "Deselect All" buttons
+		const buttonContainer = containerEl.createEl('div');
+		buttonContainer.style.marginBottom = '20px';
+
+		const selectAllBtn = buttonContainer.createEl('button');
+		selectAllBtn.setText('Select All');
+		selectAllBtn.style.marginRight = '10px';
+		selectAllBtn.addEventListener('click', async () => {
+			this.plugin.settings[settingKey] = availableFolders.map(f => f.id);
+			await this.plugin.saveSettings();
+			this.display();
+		});
+
+		const deselectAllBtn = buttonContainer.createEl('button');
+		deselectAllBtn.setText('Deselect All');
+		deselectAllBtn.addEventListener('click', async () => {
+			this.plugin.settings[settingKey] = [];
+			await this.plugin.saveSettings();
+			this.display();
+		});
 	}
 
 	display() {
@@ -3052,6 +3339,68 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 						}
 					});
 				});
+		}
+
+		new obsidian.Setting(containerEl)
+			.setName('Only sync notes from a date range')
+			.setDesc('Restrict sync to notes created within a window. Notes outside the window are left in Granola and never written to the vault.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.enableDateRangeFilter);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.enableDateRangeFilter = value;
+					await this.plugin.saveSettings();
+					this.display(); // Refresh to show/hide the range settings
+				});
+			});
+
+		if (this.plugin.settings.enableDateRangeFilter) {
+			new obsidian.Setting(containerEl)
+				.setName('Date range')
+				.setDesc('Sync notes from a rolling window of recent days, or everything on or after a fixed date.')
+				.addDropdown(dropdown => {
+					dropdown.addOption('relative', 'Last N days');
+					dropdown.addOption('fixed', 'On or after a fixed date');
+					dropdown.setValue(this.plugin.settings.dateRangeMode);
+					dropdown.onChange(async (value) => {
+						this.plugin.settings.dateRangeMode = value;
+						await this.plugin.saveSettings();
+						this.display();
+					});
+				});
+
+			if (this.plugin.settings.dateRangeMode === 'fixed') {
+				new obsidian.Setting(containerEl)
+					.setName('Sync notes created on or after')
+					.setDesc('Date in YYYY-MM-DD format. Leave empty to sync everything.')
+					.addText(text => {
+						text.setPlaceholder('2026-01-01');
+						text.setValue(this.plugin.settings.dateRangeStart);
+						text.onChange(async (value) => {
+							const trimmed = value.trim();
+							if (trimmed && !/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+								// Don't save a half-typed date, but don't nag on every keystroke either
+								return;
+							}
+							this.plugin.settings.dateRangeStart = trimmed;
+							await this.plugin.saveSettings();
+						});
+					});
+			} else {
+				new obsidian.Setting(containerEl)
+					.setName('Days to sync')
+					.setDesc('Only sync notes created in the last N days.')
+					.addText(text => {
+						text.setPlaceholder('30');
+						text.setValue(String(this.plugin.settings.dateRangeDays));
+						text.onChange(async (value) => {
+							const days = parseInt(value);
+							if (!isNaN(days) && days > 0) {
+								this.plugin.settings.dateRangeDays = days;
+								await this.plugin.saveSettings();
+							}
+						});
+					});
+			}
 		}
 
 		new obsidian.Setting(containerEl)
@@ -3469,105 +3818,46 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				});
 			});
 
-		// Show folder selection only when folder filtering is enabled
-		if (this.plugin.settings.enableFolderFilter) {
-			// Create a button to fetch available folders
-			new obsidian.Setting(containerEl)
-				.setName('Refresh folder list')
-				.setDesc('Fetch the latest list of folders from Granola')
-				.addButton(button => {
-					button.setButtonText('Refresh folders');
-					button.onClick(async () => {
-						try {
-							const token = await this.plugin.loadCredentials();
-							if (!token) {
-								new obsidian.Notice('Could not load credentials. Please check your auth key path.');
-								return;
-							}
-							const folders = await this.plugin.fetchGranolaFolders(token);
-							if (folders) {
-								this.plugin.availableGranolaFolders = folders;
-								new obsidian.Notice(`Found ${folders.length} folders`);
-								this.display(); // Refresh to show updated folders
-							} else {
-								new obsidian.Notice('Could not fetch folders from Granola');
-							}
-						} catch (error) {
-							console.error('Error fetching folders:', error);
-							new obsidian.Notice('Error fetching folders. Check console for details.');
-						}
-					});
+		new obsidian.Setting(containerEl)
+			.setName('Exclude folders')
+			.setDesc('Never sync notes from selected Granola folders. Useful when you want everything except a few folders, since new folders then sync without having to be added to a list.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.enableFolderExclusion);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.enableFolderExclusion = value;
+					await this.plugin.saveSettings();
+					this.display(); // Refresh to show/hide folder selection
 				});
+			});
 
-			// Show available folders with checkboxes
+		// Both filters work off the same folder list, so it is fetched once for either
+		if (this.plugin.settings.enableFolderFilter || this.plugin.settings.enableFolderExclusion) {
+			this.renderFolderRefreshButton(containerEl);
+
 			const availableFolders = this.plugin.availableGranolaFolders || [];
-			if (availableFolders.length > 0) {
-				const folderSelectionEl = containerEl.createEl('div', { cls: 'setting-item' });
-				const folderInfoEl = folderSelectionEl.createEl('div', { cls: 'setting-item-info' });
-				const folderNameEl = folderInfoEl.createEl('div', { cls: 'setting-item-name' });
-				folderNameEl.setText('Select folders to sync');
-				const folderDescEl = folderInfoEl.createEl('div', { cls: 'setting-item-description' });
-				folderDescEl.setText('Check the folders you want to sync. Only notes in selected folders will be synced.');
-
-				const folderListEl = containerEl.createEl('div', { cls: 'granola-folder-list' });
-				folderListEl.style.marginLeft = '20px';
-				folderListEl.style.marginBottom = '20px';
-
-				for (const folder of availableFolders) {
-					const folderItemEl = folderListEl.createEl('div', { cls: 'granola-folder-item' });
-					folderItemEl.style.display = 'flex';
-					folderItemEl.style.alignItems = 'center';
-					folderItemEl.style.marginBottom = '8px';
-
-					const checkbox = folderItemEl.createEl('input', { type: 'checkbox' });
-					checkbox.checked = this.plugin.settings.selectedGranolaFolders.includes(folder.id);
-					checkbox.style.marginRight = '8px';
-
-					const label = folderItemEl.createEl('label');
-					label.setText(folder.title + (folder.document_ids ? ` (${folder.document_ids.length} notes)` : ''));
-					label.style.cursor = 'pointer';
-
-					checkbox.addEventListener('change', async () => {
-						if (checkbox.checked) {
-							if (!this.plugin.settings.selectedGranolaFolders.includes(folder.id)) {
-								this.plugin.settings.selectedGranolaFolders.push(folder.id);
-							}
-						} else {
-							this.plugin.settings.selectedGranolaFolders = this.plugin.settings.selectedGranolaFolders.filter(id => id !== folder.id);
-						}
-						await this.plugin.saveSettings();
-					});
-
-					label.addEventListener('click', () => {
-						checkbox.click();
-					});
-				}
-
-				// Add "Select All" / "Deselect All" buttons
-				const buttonContainer = containerEl.createEl('div');
-				buttonContainer.style.marginBottom = '20px';
-
-				const selectAllBtn = buttonContainer.createEl('button');
-				selectAllBtn.setText('Select All');
-				selectAllBtn.style.marginRight = '10px';
-				selectAllBtn.addEventListener('click', async () => {
-					this.plugin.settings.selectedGranolaFolders = availableFolders.map(f => f.id);
-					await this.plugin.saveSettings();
-					this.display();
-				});
-
-				const deselectAllBtn = buttonContainer.createEl('button');
-				deselectAllBtn.setText('Deselect All');
-				deselectAllBtn.addEventListener('click', async () => {
-					this.plugin.settings.selectedGranolaFolders = [];
-					await this.plugin.saveSettings();
-					this.display();
-				});
-			} else {
+			if (availableFolders.length === 0) {
 				const noFoldersEl = containerEl.createEl('div', { cls: 'setting-item' });
 				const noFoldersInfoEl = noFoldersEl.createEl('div', { cls: 'setting-item-info' });
 				const noFoldersDescEl = noFoldersInfoEl.createEl('div', { cls: 'setting-item-description' });
 				noFoldersDescEl.setText('No folders loaded. Click "Refresh folders" to fetch available folders from Granola, or run a sync first.');
+			} else {
+				if (this.plugin.settings.enableFolderFilter) {
+					this.renderFolderCheckboxList(containerEl, availableFolders, {
+						name: 'Select folders to sync',
+						desc: 'Check the folders you want to sync. Only notes in selected folders will be synced.',
+						settingKey: 'selectedGranolaFolders',
+						showBulkButtons: true
+					});
+				}
+
+				if (this.plugin.settings.enableFolderExclusion) {
+					this.renderFolderCheckboxList(containerEl, availableFolders, {
+						name: 'Select folders to exclude',
+						desc: 'Check the folders you never want synced. Exclusion is applied last, so an excluded folder wins over the include filter above.',
+						settingKey: 'excludedGranolaFolders',
+						showBulkButtons: false
+					});
+				}
 			}
 		}
 
