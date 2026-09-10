@@ -99,6 +99,19 @@ function readGranolaKeychainPasswordMac() {
 const API_KEY_KEYCHAIN_SERVICE = 'granola-sync-plus';
 const API_KEY_KEYCHAIN_ACCOUNT = 'granola-api-key';
 
+// Calendar invitees that are not people: meeting rooms, projectors, and other
+// bookable resources. Google flags them with resource: true and addresses them
+// on *.calendar.google.com (e.g. c_1885...@resource.calendar.google.com).
+// Without this they become attendee tags such as person/c-1885....
+const NON_PERSON_EMAIL_DOMAIN = /@[^@]*\.calendar\.google\.com$/i;
+
+function isNonPersonAttendee(attendee) {
+	if (!attendee) return true;
+	if (attendee.resource === true) return true;
+	if (attendee.email && NON_PERSON_EMAIL_DOMAIN.test(attendee.email)) return true;
+	return false;
+}
+
 function storeApiKeyInKeychainMac(apiKey) {
 	try {
 		const { execFileSync } = require('child_process');
@@ -1086,7 +1099,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			doc.people = note.attendees.map(a => ({ name: a.name, email: a.email }));
 		}
 
-		if (note.calendar_event && Array.isArray(note.calendar_event.invitees)) {
+		// The invitee list is only a fallback source of attendee names. When the
+		// note carries its own attendees, those are the people who were actually
+		// in the meeting and they come with real display names; the invitee list
+		// additionally contains group aliases (team-foo@example.com) and rooms,
+		// which have no names and would be tagged as person/team-foo. Only fall
+		// back to invitees when there are no attendees to work from.
+		const hasAttendees = doc.people.length > 0;
+		if (!hasAttendees && note.calendar_event && Array.isArray(note.calendar_event.invitees)) {
 			doc.google_calendar_event = {
 				attendees: note.calendar_event.invitees.map(invitee => {
 					if (typeof invitee === 'string') return { email: invitee };
@@ -1298,8 +1318,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	generateNoteTitle(doc) {
 		const title = doc.title || 'Untitled Granola Note';
-		// Clean the title for use as a heading - remove invalid characters but keep spaces
-		return title.replace(/[<>:"/\\|?*]/g, '').trim();
+		// Clean the title for use as a heading - remove invalid characters but keep spaces.
+		// Stripping a character can leave a gap ("Shir / Ming" -> "Shir  Ming"), so
+		// collapse runs of whitespace afterwards.
+		return title
+			.replace(/[<>:"/\\|?*]/g, '')
+			.replace(/\s+/g, ' ')
+			.trim();
 	}
 
 	generateFilename(doc) {
@@ -2246,7 +2271,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					if (attendee.email && processedEmails.has(attendee.email)) {
 						continue;
 					}
-					
+
+					// Skip meeting rooms, equipment, and other non-human invitees.
+					// Google marks these with resource: true, and their addresses
+					// live on *.calendar.google.com, so they would otherwise be
+					// turned into person tags like person/c-18856jur41crmik6gsea.
+					if (isNonPersonAttendee(attendee)) {
+						if (attendee.email) {
+							processedEmails.add(attendee.email);
+						}
+						continue;
+					}
+
 					if (attendee.displayName && !attendees.includes(attendee.displayName)) {
 						attendees.push(attendee.displayName);
 						if (attendee.email) {
