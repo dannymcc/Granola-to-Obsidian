@@ -34,6 +34,8 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **⚙️ Customizable Filename Separators**: Choose how words are separated in filenames (underscore, dash, or no separator)
 - **🛡️ Smart File Conflict Handling**: Skip duplicate filenames or create timestamped versions automatically
 - **📁 Granola Folder Organization**: Mirror your Granola folder structure in Obsidian with automatic folder-based tagging
+- **🚫 Folder Exclusion**: Keep selected Granola folders out of your vault entirely, without maintaining an allow-list
+- **📆 Date Range Filter**: Sync only notes from the last N days, or everything on or after a fixed date
 
 ## 🔒 Network use & background activity
 
@@ -52,13 +54,33 @@ The plugin is marked `isDesktopOnly` because it needs to read Granola's auth tok
 
 ### Files read outside the vault (read-only, never written)
 
-The plugin uses the Node.js `fs` module to read **one** file outside the vault — Granola's local credentials file — checked at one of these paths depending on your OS:
+The plugin uses the Node.js `fs` module to read Granola's own auth files, all of which live in Granola's application data directory:
 
-- **macOS**: `~/Library/Application Support/Granola/stored-accounts.json` (or legacy `supabase.json` for older Granola builds)
-- **Windows**: `%APPDATA%\Granola\stored-accounts.json` (or legacy `supabase.json`)
-- **Linux**: `~/.config/Granola/stored-accounts.json` (or legacy `supabase.json`)
+- **macOS**: `~/Library/Application Support/Granola/`
+- **Windows**: `%APPDATA%\Granola\`
+- **Linux**: `~/.config/Granola/`
 
-These are the same files the Granola desktop app maintains for its own auth. The plugin extracts the access token from them and uses it for API requests. **Nothing outside the vault is ever written, deleted, or modified.** You can also override the path in **Settings → Auth Key Path**.
+Within that directory it reads:
+
+| File | Why |
+|---|---|
+| `stored-accounts.json` / `supabase.json` | Plaintext credentials, used by older Granola builds |
+| `stored-accounts.json.enc` | Encrypted credentials, used by Granola 7.255+ |
+| `storage.dek` | The wrapped key that decrypts the `.enc` file |
+| `Local State` *(Windows only)* | Holds the DPAPI-protected key that unwraps `storage.dek` |
+
+These are the same files the Granola desktop app maintains for its own auth. The plugin extracts the access token from them and uses it for API requests. **Nothing outside the vault is ever written, deleted, or modified.** You can also override the plaintext credentials path in **Settings → Auth Key Path**.
+
+If you use the official API key auth mode instead, none of these files are read at all — the key you paste into settings is used directly.
+
+### Subprocesses
+
+Granola encrypts its credentials with a key held by the operating system's own secret store, so decrypting them requires asking the OS. Node has no binding for either API, so the plugin shells out to a system binary, only when it needs to read encrypted credentials:
+
+- **macOS**: `/usr/bin/security` — reads the "Granola Safe Storage" Keychain item (you'll see a one-time Keychain prompt), and stores/reads your Granola API key in the Keychain if you use API mode
+- **Windows**: `powershell.exe` — unwraps the DPAPI-protected key from `Local State` via .NET's `ProtectedData` API
+
+Both are invoked without a shell, with no user-controlled arguments.
 
 ### Vault enumeration
 
@@ -251,6 +273,18 @@ Automatically organize synced notes to mirror your Granola folder structure:
 - **Folder Tag Template**: Customize how folder hierarchy becomes tags (e.g., `folder/{name}`)
 
 **Example**: A note in Granola's "Team Meetings/Standups" folder becomes tagged as `folder/Team_Meetings` and `folder/Standups`.
+
+### Choosing Which Notes Sync
+
+Three independent filters decide which Granola notes reach your vault. They're applied in this order, and a note has to survive all of them:
+
+1. **Enable folder filter** — sync *only* notes from the folders you tick. Best when you want a small, fixed set of folders.
+2. **Exclude folders** — never sync notes from the folders you tick. Best when you want everything *except* a few folders, since folders you add in Granola later then sync automatically without you having to update a list. Exclusion is applied after the include filter, so if a note's folder appears in both lists it is not synced. Notes that aren't in any folder are never excluded.
+3. **Only sync notes from a date range** — restrict sync by note creation date, in one of two modes:
+   - **Last N days**: a rolling window, e.g. the last 30 days
+   - **On or after a fixed date**: everything from a given `YYYY-MM-DD` date onwards, interpreted in your local timezone
+
+Notes filtered out are simply not written to the vault; nothing already in your vault is deleted. Notes with a missing or unreadable creation date are always kept, so the date filter can't silently lose them.
 
 ## 🎯 Usage
 
@@ -476,6 +510,16 @@ Your converted meeting content appears here in clean Markdown format.
   - **Windows**: `C:\Users\[USERNAME]\AppData\Roaming\Granola\supabase.json`
 - If the file is in a different location, update the "Auth Key Path" in plugin settings
 - Try logging out and back in to Granola
+
+### Windows: sync stops working after a Granola update
+
+Granola 7.255+ stopped refreshing the plaintext credentials file and now keeps its
+token in `stored-accounts.json.enc`, encrypted with a key Windows protects via
+DPAPI. The plugin reads that path automatically. If it can't:
+
+- Check the console (Ctrl + Shift + I) for a message naming which step failed — `Local State`, `storage.dek`, or the DPAPI unwrap.
+- The DPAPI key is tied to your Windows user account, so Obsidian and Granola must be running as the **same user**. Running either as administrator, or under a different account, will fail to decrypt.
+- `%APPDATA%\Granola\Local State` and `%APPDATA%\Granola\storage.dek` must both exist. If either is missing, sign out of Granola and back in to have it recreate them.
 
 ### Official API Key Errors
 

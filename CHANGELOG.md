@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.13.0] - 2026-09-10
+
+### Added
+- **🪟 Windows credentials now decrypt (sync works again on Windows)**: Every `.enc` decryption helper was macOS-only, so since Granola 7.255+ stopped refreshing the plaintext credential files, Windows users had no working auth path at all — `loadCredentials()` fell through to a stale token and every request 401'd, with sync dying silently. Windows keeps the Chromium `os_crypt` master key in Granola's `Local State` as a DPAPI-protected blob rather than in a Keychain item, and encrypts with AES-256-GCM against that key directly instead of macOS's PBKDF2/AES-128-CBC; both differences are now handled in a `win32` branch. The unwrap goes through PowerShell's `ProtectedData` API, mirroring the existing shell-out to `/usr/bin/security` on macOS — the plugin still ships no native dependencies. Reported with a full diagnosis by [@aalibhai-gorgias](https://github.com/aalibhai-gorgias) in [#64](https://github.com/dannymcc/Granola-to-Obsidian/issues/64).
+- **🚫 Exclude folders**: A new "Exclude folders" filter skips notes in the Granola folders you tick. The existing folder filter is an allow-list, which meant users who wanted everything *except* a couple of folders had to re-tick the list every time they added a folder in Granola. Exclusion is applied after the include filter, so an excluded folder wins, and it considers every folder a note belongs to rather than just the first. Notes that aren't in a folder are never excluded. Requested by [@jkampfwealthbox](https://github.com/jkampfwealthbox) in [#46](https://github.com/dannymcc/Granola-to-Obsidian/issues/46).
+- **📆 Date range filter**: Restrict sync to notes from the last N days, or to everything created on or after a fixed `YYYY-MM-DD` date (interpreted in your local timezone, so "on or after the 1st" includes the whole of the 1st). Notes with a missing or unreadable creation date are always kept, so the filter can't silently lose notes, and an invalid date is ignored rather than blocking every note. Requested by [@19prince](https://github.com/19prince) in [#65](https://github.com/dannymcc/Granola-to-Obsidian/issues/65).
+
+### Fixed
+- **♻️ Sync no longer touches notes it isn't changing**: Both write paths rewrote files unconditionally — a full update wrote the same bytes back whenever Granola reported any change, and the "Skip existing notes" metadata refresh called `processFrontMatter()`, which always rewrites the file even when it produces byte-identical frontmatter. Every note was therefore touched on every sync, which Obsidian Sync records as a new version of the file and charges vault storage for. Full updates now compare against the file on disk first, and the metadata refresh works out whether the frontmatter would actually differ before writing. Reported by [@raveeshbhalla](https://github.com/raveeshbhalla) in [#47](https://github.com/dannymcc/Granola-to-Obsidian/issues/47).
+- **🏷️ Meeting rooms and group aliases are no longer tagged as people**: Calendar invitee lists include bookable resources (`c_1885…@resource.calendar.google.com`) and group addresses (`team-api-core@example.com`) alongside real attendees. Having no display name, these fell through to the email localpart and produced permanent vault tags like `person/c-1885jur41crmik6gseagvjq5ocde` and `person/team-api-core`. Non-human invitees are now skipped, keyed on Google's `resource: true` flag or any `*.calendar.google.com` address, in both auth modes and in both the attendee and invitee lists. In API mode the invitee list is also demoted to a fallback, consulted only when a note has no attendees of its own, since attendees carry real names. Note that the plugin does not retroactively clean tags it previously wrote — existing notes need a separate pass. Fixed by [@shirgoldbird](https://github.com/shirgoldbird) in [#69](https://github.com/dannymcc/Granola-to-Obsidian/pull/69).
+- **📝 Headings no longer keep a gap where a character was stripped**: A title containing a filesystem-invalid character produced a double space in the H1 — `Shir / Ming` became `# Shir  Ming`. Fixed by [@shirgoldbird](https://github.com/shirgoldbird) in [#69](https://github.com/dannymcc/Granola-to-Obsidian/pull/69).
+- **📂 "Refresh folders" no longer fires a doomed request in API mode**: The official API has no folder-listing endpoint — folders are derived from the notes themselves during a sync — so the button now says so instead of attempting a fetch that cannot succeed.
+
+### Behaviour changes worth knowing about
+- Invited-but-absent people are no longer tagged in API mode, because the attendees list now drives tagging rather than the invitee list. This is the correct reading of "who was in this meeting", but it is a change in output if you relied on invitee-derived tags.
+- With "Skip existing notes" on and no attendee tags, Granola URL, or backlinks to add, the plugin no longer writes an empty `tags: []` property into notes that had no tags.
+
+### Documentation
+- The "Permissions & filesystem access" section now lists every file the plugin reads outside the vault (`stored-accounts.json.enc`, `storage.dek`, and Windows' `Local State`, alongside the plaintext files) and documents the two subprocesses it spawns and why — `/usr/bin/security` on macOS and `powershell.exe` on Windows.
+- New "Choosing Which Notes Sync" section explaining how the folder filter, folder exclusion, and date range filter interact and in what order they apply.
+- New Windows troubleshooting section covering DPAPI decryption failures.
+
+### Credits
+- Thanks to [@shirgoldbird](https://github.com/shirgoldbird) for the attendee-tagging fixes in [#69](https://github.com/dannymcc/Granola-to-Obsidian/pull/69), including the careful history of which auth mode caused what.
+- Thanks to [@aalibhai-gorgias](https://github.com/aalibhai-gorgias) for the Windows diagnosis in [#64](https://github.com/dannymcc/Granola-to-Obsidian/issues/64), which mapped out the DPAPI flow step by step.
+
 ## [1.12.1] - 2026-08-05
 
 ### Fixed
