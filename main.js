@@ -220,6 +220,141 @@ function decryptGranolaEncFile(ciphertext, dek) {
 	return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
+// Windows: unwrap a DPAPI blob via PowerShell. Node's crypto module has no
+// binding for CryptUnprotectData and this plugin ships no native dependencies,
+// so the .NET ProtectedData API is the way in. The blob goes through an
+// environment variable rather than argv, which other processes on the machine
+// can read.
+function dpapiUnprotectWin(blob) {
+	try {
+		const { execFileSync } = require('child_process');
+		const script =
+			"Add-Type -AssemblyName System.Security; " +
+			"$b = [Convert]::FromBase64String($env:GRANOLA_DPAPI_BLOB); " +
+			"$k = [System.Security.Cryptography.ProtectedData]::Unprotect($b, $null, " +
+			"[System.Security.Cryptography.DataProtectionScope]::CurrentUser); " +
+			"[Convert]::ToBase64String($k)";
+		const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+		const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+		const out = execFileSync(
+			fs.existsSync(powershell) ? powershell : 'powershell.exe',
+			['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+			{
+				encoding: 'utf8',
+				stdio: ['ignore', 'pipe', 'pipe'],
+				timeout: 30000,
+				env: Object.assign({}, process.env, { GRANOLA_DPAPI_BLOB: blob.toString('base64') })
+			}
+		);
+		// Strip all whitespace, not just the trailing newline: PowerShell wraps
+		// long strings at the output width when stdout is redirected.
+		const decoded = Buffer.from(out.replace(/\s+/g, ''), 'base64');
+		return decoded.length > 0 ? decoded : null;
+	} catch (e) {
+		console.warn('Could not unprotect Granola DPAPI blob:', e.message || e);
+		return null;
+	}
+}
+
+// Windows: read Chromium's os_crypt master key out of Granola's "Local State".
+// It is stored base64-encoded with a 5-byte "DPAPI" marker in front of the
+// DPAPI blob; unwrapping it yields the 32-byte AES key safeStorage encrypts with.
+function readGranolaMasterKeyWin(granolaDir) {
+	const localStatePath = path.join(granolaDir, 'Local State');
+	if (!fs.existsSync(localStatePath)) {
+		console.warn('Granola "Local State" not found at:', localStatePath);
+		return null;
+	}
+	try {
+		const localState = JSON.parse(fs.readFileSync(localStatePath, 'utf8'));
+		const encoded = localState && localState.os_crypt && localState.os_crypt.encrypted_key;
+		if (!encoded) {
+			console.warn('Granola "Local State" has no os_crypt.encrypted_key');
+			return null;
+		}
+		let blob = Buffer.from(encoded, 'base64');
+		if (blob.slice(0, 5).toString() === 'DPAPI') {
+			blob = blob.slice(5);
+		}
+		const key = dpapiUnprotectWin(blob);
+		if (!key) return null;
+		if (key.length !== 32) {
+			console.warn('Granola os_crypt key unwrapped to', key.length, 'bytes, expected 32');
+			return null;
+		}
+		return key;
+	} catch (e) {
+		console.warn('Failed to read Granola os_crypt key from "Local State":', e.message || e);
+		return null;
+	}
+}
+
+// Decrypt a Chromium os_crypt v10 payload as written on Windows. Unlike the
+// macOS variant (PBKDF2 + AES-128-CBC), Windows uses the Local State master key
+// directly with AES-256-GCM: 3-byte 'v10' prefix, 12-byte nonce, ciphertext,
+// 16-byte tag.
+function decryptChromiumOsCryptV10Win(ciphertext, masterKey) {
+	const crypto = require('crypto');
+	if (ciphertext.length <= 3 + 12 + 16 || ciphertext.slice(0, 3).toString() !== 'v10') {
+		throw new Error('not a Chromium os_crypt v10 (Windows) payload');
+	}
+	const nonce = ciphertext.slice(3, 15);
+	const tag = ciphertext.slice(ciphertext.length - 16);
+	const data = ciphertext.slice(15, ciphertext.length - 16);
+	const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, nonce);
+	decipher.setAuthTag(tag);
+	return Buffer.concat([decipher.update(data), decipher.final()]);
+}
+
+// Windows equivalent of readGranolaDekMac(): storage.dek wraps the same 32-byte
+// DEK, in the same two shapes (raw or base64), just under a different os_crypt
+// scheme.
+function readGranolaDekWin(granolaDir, masterKey) {
+	const dekPath = path.join(granolaDir, 'storage.dek');
+	if (!fs.existsSync(dekPath)) {
+		console.warn('Granola storage.dek not found at:', dekPath);
+		return null;
+	}
+	try {
+		const decrypted = decryptChromiumOsCryptV10Win(fs.readFileSync(dekPath), masterKey);
+		if (decrypted.length === 32) return decrypted;
+		if (decrypted.length === 44) {
+			const ascii = decrypted.toString('ascii');
+			if (/^(?:[A-Za-z0-9+/]{43}=|[A-Za-z0-9_-]{43}=)$/.test(ascii)) {
+				const decoded = Buffer.from(ascii, 'base64');
+				if (decoded.length === 32) return decoded;
+			}
+		}
+		console.warn('Granola storage.dek decrypted to unexpected', decrypted.length, 'bytes; cannot derive 32-byte DEK');
+		return null;
+	} catch (e) {
+		console.warn('Failed to decrypt Granola storage.dek:', e.message || e);
+		return null;
+	}
+}
+
+// Windows path for stored-accounts.json.enc (#64). Same two-level shape as
+// macOS - storage.dek wraps the DEK, the DEK decrypts the .enc file - but the
+// master key comes from DPAPI via "Local State" instead of the Keychain.
+function readEncryptedCredentialsTokenWin(filePath) {
+	if (!obsidian.Platform.isWin) return null;
+	if (!fs.existsSync(filePath)) return null;
+	const granolaDir = path.dirname(filePath);
+	const masterKey = readGranolaMasterKeyWin(granolaDir);
+	if (!masterKey) return null;
+	const dek = readGranolaDekWin(granolaDir, masterKey);
+	if (!dek) return null;
+	try {
+		const ciphertext = fs.readFileSync(filePath);
+		const plaintext = decryptGranolaEncFile(ciphertext, dek);
+		const data = JSON.parse(plaintext);
+		return extractAccessTokenFromData(data);
+	} catch (e) {
+		console.warn('Failed to decrypt Granola encrypted credentials file:', e.message || e);
+		return null;
+	}
+}
+
 // macOS-only path for stored-accounts.json.enc (added in Granola 7.255+, see #58).
 // Two-level decrypt: storage.dek is os_crypt v10 (master from Keychain) wrapping a
 // 32-byte DEK; the .enc file is AES-256-GCM using that DEK. Returns the access_token
@@ -844,7 +979,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		// source. If every source is expired, we still return the first parseable one
 		// so behaviour is no worse than before this fix.
 		const candidates = [
-			{ kind: 'enc-mac', filePath: storedAccountsEncPath },
+			{ kind: 'enc', filePath: storedAccountsEncPath },
 			{ kind: 'plain', filePath: storedAccountsPath },
 			{ kind: 'plain', filePath: path.resolve(homedir, this.settings.authKeyPath) },
 			{ kind: 'plain', filePath: path.resolve(homedir, 'Users', require('os').userInfo().username, 'Library/Application Support/Granola/supabase.json') },
@@ -860,9 +995,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 			let token = null;
 			try {
-				if (cand.kind === 'enc-mac') {
-					if (!obsidian.Platform.isMacOS) continue;
-					token = readEncryptedCredentialsTokenMac(cand.filePath);
+				if (cand.kind === 'enc') {
+					if (obsidian.Platform.isMacOS) {
+						token = readEncryptedCredentialsTokenMac(cand.filePath);
+					} else if (obsidian.Platform.isWin) {
+						token = readEncryptedCredentialsTokenWin(cand.filePath);
+					} else {
+						continue;
+					}
 				} else {
 					token = readPlainCredentialsToken(cand.filePath);
 				}
