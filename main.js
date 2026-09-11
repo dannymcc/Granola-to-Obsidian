@@ -1570,7 +1570,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			.trim();
 	}
 
-	generateFilename(doc) {
+	// The template tokens shared by the filename template and the additional
+	// frontmatter setting, so a token means the same thing wherever it is used.
+	// Dates use the "Date format" setting, same as filenames.
+	substituteTemplateTokens(template, doc) {
 		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
 
@@ -1593,7 +1596,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			updatedDateTime = this.formatDate(doc.updated_at, this.settings.dateFormat + '_HH-mm-ss');
 		}
 
-		let filename = this.settings.filenameTemplate
+		return template
 			.replace(/{title}/g, title)
 			.replace(/{id}/g, docId)
 			.replace(/{created_date}/g, createdDate)
@@ -1602,6 +1605,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			.replace(/{updated_time}/g, updatedTime)
 			.replace(/{created_datetime}/g, createdDateTime)
 			.replace(/{updated_datetime}/g, updatedDateTime);
+	}
+
+	generateFilename(doc) {
+		let filename = this.substituteTemplateTokens(this.settings.filenameTemplate, doc);
 
 		if (this.settings.notePrefix) {
 			filename = this.settings.notePrefix + filename;
@@ -2782,24 +2789,98 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	 * Parse additional frontmatter from settings
 	 * @returns {string} - Additional frontmatter lines
 	 */
-	parseAdditionalFrontmatter() {
+	parseAdditionalFrontmatter(doc) {
 		if (!this.settings.additionalFrontmatter || !this.settings.additionalFrontmatter.trim()) {
 			return '';
 		}
-		
+
 		try {
 			// Split by newlines, filter empty lines, ensure each line ends with newline
 			const lines = this.settings.additionalFrontmatter
 				.split('\n')
 				.map(line => line.trim())
-				.filter(line => line.length > 0 && line.includes(':'));
-			
+				.filter(line => line.length > 0 && line.includes(':'))
+				.map(line => this.applyFrontmatterTokens(line, doc));
+
 			if (lines.length === 0) return '';
 			return lines.join('\n') + '\n';
 		} catch (error) {
 			console.error('Error parsing additional frontmatter:', error);
 			return '';
 		}
+	}
+
+	// Substitute template tokens into one "key: value" line of additional
+	// frontmatter, so a property can carry the note's own title or date rather
+	// than a fixed string (#35). A line with no token in its value is returned
+	// untouched, so existing configurations keep behaving exactly as before.
+	applyFrontmatterTokens(line, doc) {
+		const TOKEN = /{[a-z_]+}/;
+		if (!doc || !TOKEN.test(line)) return line;
+
+		const separator = line.indexOf(':');
+		if (separator === -1) return line;
+
+		const key = line.slice(0, separator);
+		let template = line.slice(separator + 1).trim();
+		// A token in the key alone is not something we can meaningfully fill in
+		if (!TOKEN.test(template)) return line;
+
+		// If the value was already quoted, substitute inside the quotes and
+		// re-quote the result, rather than nesting one pair inside the other.
+		let alreadyQuoted = false;
+		if (template.length >= 2 &&
+			((template.startsWith('"') && template.endsWith('"')) ||
+			 (template.startsWith("'") && template.endsWith("'")))) {
+			template = template.slice(1, -1);
+			alreadyQuoted = true;
+		}
+
+		const value = this.substituteTemplateTokens(template, doc);
+		// Nothing matched a known token, so there is nothing to fill in and no
+		// reason to reformat the line. Leaves unrecognised {placeholders} exactly
+		// as the user typed them.
+		if (value === template) return line;
+
+		return key + ': ' + (alreadyQuoted ? this.quoteYamlString(value) : this.toYamlScalar(value));
+	}
+
+	// Emit a value as a YAML scalar, quoting only when a bare one would misparse.
+	// Meeting titles routinely contain a colon ("Q3: Planning"), which would
+	// otherwise turn one property into invalid YAML and break the whole
+	// frontmatter block in Obsidian.
+	toYamlScalar(value) {
+		const breaksYaml = value === '' ||
+			/^['\s>|*&!%@`{}\[\],#?:-]/.test(value) ||  // YAML-significant first character
+			/:(\s|$)/.test(value) ||                    // reads as a nested key
+			/\s#/.test(value) ||                        // reads as a comment
+			/["\\\n\r\t]/.test(value) ||
+			/\s$/.test(value);
+
+		// A value that parses as a non-string type is worse than a broken one,
+		// because it fails quietly: a meeting called "yes" becomes the boolean
+		// true and shows up in Obsidian as a ticked checkbox, "123" becomes a
+		// number, "null" becomes nothing at all. These are all strings to us.
+		const changesType = /^(y|n|yes|no|true|false|on|off|null|~)$/i.test(value) ||
+			/^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(value) ||  // int / float (incl. ".5") / exponent
+			/^0x[0-9a-fA-F_]+$/.test(value) ||                        // hex
+			/^0o?[0-7_]+$/.test(value) ||                             // octal
+			/^[-+]?\.(inf|nan)$/i.test(value) ||
+			/^[-+]?\d+(:[0-5]?\d)+$/.test(value);                     // sexagesimal ("1:30" -> 90)
+
+		// Date-shaped values are deliberately left bare: {created_date} exists so
+		// that a property can be a real Obsidian date, and quoting turns it into
+		// plain text. A title that happens to look like a date is harmless here.
+
+		return (breaksYaml || changesType) ? this.quoteYamlString(value) : value;
+	}
+
+	quoteYamlString(value) {
+		return '"' + value
+			.replace(/\\/g, '\\\\')
+			.replace(/"/g, '\\"')
+			.replace(/\r?\n/g, ' ')
+			.replace(/\t/g, ' ') + '"';
 	}
 
 	/**
@@ -2857,7 +2938,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		// Additional custom frontmatter
-		const additionalFm = this.parseAdditionalFrontmatter();
+		const additionalFm = this.parseAdditionalFrontmatter(doc);
 		if (additionalFm) {
 			frontmatter += additionalFm;
 		}
@@ -3722,9 +3803,9 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 
 		new obsidian.Setting(containerEl)
 			.setName('Additional frontmatter')
-			.setDesc('Add custom fields to frontmatter. One per line in "key: value" format. Example: "type: meeting" or "status: draft"')
+			.setDesc('Add custom fields to frontmatter. One per line in "key: value" format. Values can use the same tokens as the filename template - {title}, {id}, {created_date}, {updated_date}, {created_time}, {updated_time}, {created_datetime}, {updated_datetime} - so "meeting_date: {created_date}" fills in each note\'s own date. Values are quoted automatically when they need it.')
 			.addTextArea(textArea => {
-				textArea.setPlaceholder('type: meeting\nstatus: draft');
+				textArea.setPlaceholder('type: meeting\nmeeting_date: {created_date}\nsource: {title}');
 				textArea.setValue(this.plugin.settings.additionalFrontmatter);
 				textArea.inputEl.rows = 4;
 				textArea.inputEl.cols = 30;

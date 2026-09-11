@@ -36,6 +36,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **📁 Granola Folder Organization**: Mirror your Granola folder structure in Obsidian with automatic folder-based tagging
 - **🚫 Folder Exclusion**: Keep selected Granola folders out of your vault entirely, without maintaining an allow-list
 - **📆 Date Range Filter**: Sync only notes from the last N days, or everything on or after a fixed date
+- **🧩 Templated Frontmatter Properties**: Fill your own frontmatter properties with each note's title, date, or ID using template tokens
 
 ## 🔒 Network use & background activity
 
@@ -136,6 +137,17 @@ As of v1.12.0, you can switch **Settings → Granola Sync Plus → Auth Mode** t
 2. Paste the key into **Settings → Granola Sync Plus → Granola API key**. On macOS it's stored in the system Keychain, not in plaintext in your vault.
 3. Notes without an AI-generated summary aren't returned by this API and won't sync, and there's currently no endpoint for listing folders directly (folder membership is inferred per-note instead).
 
+#### Personal vs workspace keys
+
+Granola offers two kinds of key, and they see different notes:
+
+| Key type | What syncs |
+|---|---|
+| **Personal** | Your own notes. This is the right choice for most people. |
+| **Workspace** | Workspace-public notes — which can include meetings recorded by colleagues, not just your own. |
+
+If you only want your own meetings, use a personal key. If you're trying to pull in notes your team shared with you (see [#41](https://github.com/dannymcc/Granola-to-Obsidian/issues/41)), a workspace key is worth trying — the plugin syncs whatever the key can see, so this is the one route to team notes that works today. Be aware it may pull in a lot more than you expect; the folder filter and date range filter are useful for narrowing it back down.
+
 If sync fails in this mode, see **Troubleshooting → Official API Key Errors** below.
 
 ### Filename Template
@@ -152,6 +164,26 @@ Customize how your notes are named using these variables:
 **Example Templates:**
 - `{created_date}_{title}` → `2025-06-06_Team_Standup_Meeting.md`
 - `Meeting_{created_datetime}_{title}` → `Meeting_2025-06-06_14-30-00_Team_Standup_Meeting.md`
+
+### Custom Frontmatter Properties
+
+**Settings → Additional frontmatter** adds your own properties to every synced note, one `key: value` per line. Values accept the same tokens as the filename template, so a property can carry the note's own details rather than a fixed string:
+
+```yaml
+type: meeting
+meeting_date: {created_date}
+source: {title}
+granola_ref: {id}
+```
+
+Available tokens: `{title}`, `{id}`, `{created_date}`, `{updated_date}`, `{created_time}`, `{updated_time}`, `{created_datetime}`, `{updated_datetime}`. Dates use your **Date Format** setting, the same as filenames do.
+
+A few details worth knowing:
+
+- **Values are quoted automatically when they need it.** Meeting titles routinely contain a colon, and `meeting: Q3: Planning` is invalid YAML that would break the whole frontmatter block — so it's written as `meeting: "Q3: Planning"` instead.
+- **Values that would change type are quoted too.** A meeting called "yes" would otherwise become the boolean `true` and show in Obsidian as a ticked checkbox; one called "123" would become a number. These stay as text.
+- **Date tokens stay unquoted**, so `meeting_date: {created_date}` gives you a real Obsidian date property you can sort and query on.
+- **Lines without a token are passed through exactly as written**, so existing configurations are unaffected.
 
 ### Date Format
 Customize date formatting using these tokens:
