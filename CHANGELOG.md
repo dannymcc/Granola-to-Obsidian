@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.14.0] - 2026-09-11
+
+### Added
+- **🧩 Template tokens in additional frontmatter**: The **Additional frontmatter** setting previously emitted its lines literally, so every synced note got the same fixed values. Values now accept the same tokens the filename template already supported — `{title}`, `{id}`, `{created_date}`, `{updated_date}`, `{created_time}`, `{updated_time}`, `{created_datetime}`, `{updated_datetime}` — so `meeting_date: {created_date}` gives each note its own date. This covers a good part of the property customisation asked for in [#35](https://github.com/dannymcc/Granola-to-Obsidian/issues/35) without a full template system; [#14](https://github.com/dannymcc/Granola-to-Obsidian/issues/14) remains open for that.
+  - Substituted values are quoted automatically when a bare YAML scalar would misparse. Meeting titles routinely contain a colon, and `meeting: Q3: Planning` is invalid YAML that would break the entire frontmatter block in Obsidian.
+  - Values that would silently change type are quoted too: a meeting called "yes" would otherwise be read as the boolean `true` and render as a ticked checkbox, "123" as a number, "null" as nothing at all. Verified against a real YAML parser over 61 awkward titles.
+  - Date tokens are deliberately left unquoted, so `meeting_date: {created_date}` produces a genuine Obsidian date property rather than text.
+  - Lines containing no token are passed through byte-for-byte, so existing configurations behave exactly as before.
+
+### Documentation
+- **Personal vs workspace API keys**: the readme's API key setup never mentioned that Granola offers two kinds of key which see different notes — a personal key sees your own notes, a workspace key can see workspace-public notes including meetings recorded by colleagues. That detail existed only in the 1.12.0 changelog. It is now in the setup section, along with the note that a workspace key is currently the only working route to the team notes requested in [#41](https://github.com/dannymcc/Granola-to-Obsidian/issues/41).
+- New "Custom Frontmatter Properties" section documenting the available tokens and the quoting behaviour.
+
 ## [1.13.0] - 2026-09-10
 
 ### Added
